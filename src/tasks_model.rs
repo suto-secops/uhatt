@@ -17,14 +17,13 @@ use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QStri
 use rusqlite::Connection;
 
 use crate::db::{self, TaskNode};
-use crate::domain::TaskStatus;
+use crate::domain::{ProjectFilter, TaskStatus};
 
 #[cxx_qt::bridge]
 pub mod qobject {
-    unsafe extern "C++Qt" {
+    unsafe extern "C++" {
         include!(<QtCore/QAbstractListModel>);
         /// Qt base class.
-        #[qobject]
         type QAbstractListModel;
     }
 
@@ -48,7 +47,7 @@ pub mod qobject {
 
     /// Item roles exposed to QML delegates.
     #[qenum(TaskListModel)]
-    enum Role {
+    enum TaskRole {
         Id,
         Title,
         Done,
@@ -64,15 +63,27 @@ pub mod qobject {
         #[qobject]
         #[qml_element]
         #[base = QAbstractListModel]
+        // "" = every task, "unfiled" = tasks with no project, otherwise a project id.
+        #[qproperty(QString, project_filter, cxx_name = "projectFilter", READ, WRITE = set_project_filter)]
         type TaskListModel = super::TaskListModelRust;
     }
 
     impl cxx_qt::Initialize for TaskListModel {}
 
     extern "RustQt" {
-        /// Append a new root task. No-op on blank input.
+        /// Change which project's tasks are shown and reload.
+        #[cxx_name = "setProjectFilter"]
+        fn set_project_filter(self: Pin<&mut TaskListModel>, value: QString);
+
+        /// Append a new root task in the current project filter (if any). No-op on blank input.
         #[qinvokable]
         fn add(self: Pin<&mut TaskListModel>, title: &QString);
+
+        /// Move the task at `row` (and its subtree) to `project_id`, or to
+        /// unfiled when `project_id` is empty.
+        #[qinvokable]
+        #[cxx_name = "moveToProject"]
+        fn move_to_project(self: Pin<&mut TaskListModel>, row: i32, project_id: &QString);
 
         /// Add a subtask under the task at `row`, expanding it. No-op on blank input.
         #[qinvokable]
@@ -135,10 +146,21 @@ pub mod qobject {
 #[derive(Default)]
 pub struct TaskListModelRust {
     conn: Option<Connection>,
+    /// Backs the `projectFilter` Q_PROPERTY (see [`parse_filter`]).
+    project_filter: QString,
     tree: Vec<TaskNode>,
     collapsed: HashSet<String>,
     /// Indices into `tree` that are currently visible, in display order.
     visible: Vec<usize>,
+}
+
+/// Interpret the `projectFilter` string.
+fn parse_filter(s: &str) -> ProjectFilter {
+    match s {
+        "" => ProjectFilter::All,
+        "unfiled" => ProjectFilter::Unfiled,
+        id => ProjectFilter::Only(id.to_owned()),
+    }
 }
 
 /// Walk a pre-ordered tree and return the indices whose ancestors are all
@@ -170,7 +192,7 @@ impl cxx_qt::Initialize for qobject::TaskListModel {
                 db::open_in_memory().expect("in-memory database")
             }
         };
-        let tree = db::list_task_tree(&conn).unwrap_or_default();
+        let tree = db::list_task_tree(&conn, &ProjectFilter::All).unwrap_or_default();
         let visible = compute_visible(&tree, &HashSet::new());
         let mut rust = self.as_mut().rust_mut();
         rust.conn = Some(conn);
@@ -199,7 +221,8 @@ impl qobject::TaskListModel {
     /// Re-read the tree from SQLite, drop stale collapsed ids, recompute the
     /// visible set, all wrapped in a model reset.
     fn reload(mut self: Pin<&mut Self>) {
-        let tree = db::list_task_tree(self.db_conn()).unwrap_or_default();
+        let filter = parse_filter(&self.project_filter.to_string());
+        let tree = db::list_task_tree(self.db_conn(), &filter).unwrap_or_default();
         let live: HashSet<&str> = tree.iter().map(|n| n.task.id.as_str()).collect();
         let collapsed: HashSet<String> = self
             .collapsed
@@ -221,13 +244,26 @@ impl qobject::TaskListModel {
         }
     }
 
+    fn set_project_filter(mut self: Pin<&mut Self>, value: QString) {
+        if self.project_filter == value {
+            return;
+        }
+        self.as_mut().rust_mut().project_filter = value;
+        self.reload();
+    }
+
     fn add(self: Pin<&mut Self>, title: &QString) {
         let title = title.to_string();
         let title = title.trim();
         if title.is_empty() {
             return;
         }
-        if let Err(e) = db::create_task(self.db_conn(), title, None) {
+        // New root tasks land in the currently filtered project, if any.
+        let project = match parse_filter(&self.project_filter.to_string()) {
+            ProjectFilter::Only(id) => Some(id),
+            _ => None,
+        };
+        if let Err(e) = db::create_task(self.db_conn(), title, None, project.as_deref()) {
             eprintln!("uhatt: add task failed: {e}");
             return;
         }
@@ -243,12 +279,26 @@ impl qobject::TaskListModel {
         let Some(parent_id) = self.id_at(row) else {
             return;
         };
-        if let Err(e) = db::create_task(self.db_conn(), title, Some(&parent_id)) {
+        // Subtasks inherit the parent's project, so pass None here.
+        if let Err(e) = db::create_task(self.db_conn(), title, Some(&parent_id), None) {
             eprintln!("uhatt: add subtask failed: {e}");
             return;
         }
         // Make sure the new child is visible.
         self.as_mut().rust_mut().collapsed.remove(&parent_id);
+        self.reload();
+    }
+
+    fn move_to_project(self: Pin<&mut Self>, row: i32, project_id: &QString) {
+        let Some(task_id) = self.id_at(row) else {
+            return;
+        };
+        let project_id = project_id.to_string();
+        let target = (!project_id.is_empty()).then_some(project_id.as_str());
+        if let Err(e) = db::set_task_project(self.db_conn(), &task_id, target) {
+            eprintln!("uhatt: move task to project failed: {e}");
+            return;
+        }
         self.reload();
     }
 
@@ -324,13 +374,13 @@ impl qobject::TaskListModel {
         };
         let task = &node.task;
 
-        match (qobject::Role { repr: role }) {
-            qobject::Role::Id => QVariant::from(&QString::from(task.id.as_str())),
-            qobject::Role::Title => QVariant::from(&QString::from(task.title.as_str())),
-            qobject::Role::Done => QVariant::from(&task.is_done()),
-            qobject::Role::Depth => QVariant::from(&(node.depth as i32)),
-            qobject::Role::HasChildren => QVariant::from(&node.has_children),
-            qobject::Role::Expanded => {
+        match (qobject::TaskRole { repr: role }) {
+            qobject::TaskRole::Id => QVariant::from(&QString::from(task.id.as_str())),
+            qobject::TaskRole::Title => QVariant::from(&QString::from(task.title.as_str())),
+            qobject::TaskRole::Done => QVariant::from(&task.is_done()),
+            qobject::TaskRole::Depth => QVariant::from(&(node.depth as i32)),
+            qobject::TaskRole::HasChildren => QVariant::from(&node.has_children),
+            qobject::TaskRole::Expanded => {
                 QVariant::from(&(node.has_children && !self.collapsed.contains(&task.id)))
             }
             _ => QVariant::default(),
@@ -339,15 +389,18 @@ impl qobject::TaskListModel {
 
     fn role_names(&self) -> QHash<QHashPair_i32_QByteArray> {
         let mut roles = QHash::<QHashPair_i32_QByteArray>::default();
-        roles.insert(qobject::Role::Id.repr, QByteArray::from("id"));
-        roles.insert(qobject::Role::Title.repr, QByteArray::from("title"));
-        roles.insert(qobject::Role::Done.repr, QByteArray::from("done"));
-        roles.insert(qobject::Role::Depth.repr, QByteArray::from("depth"));
+        roles.insert(qobject::TaskRole::Id.repr, QByteArray::from("id"));
+        roles.insert(qobject::TaskRole::Title.repr, QByteArray::from("title"));
+        roles.insert(qobject::TaskRole::Done.repr, QByteArray::from("done"));
+        roles.insert(qobject::TaskRole::Depth.repr, QByteArray::from("depth"));
         roles.insert(
-            qobject::Role::HasChildren.repr,
+            qobject::TaskRole::HasChildren.repr,
             QByteArray::from("hasChildren"),
         );
-        roles.insert(qobject::Role::Expanded.repr, QByteArray::from("expanded"));
+        roles.insert(
+            qobject::TaskRole::Expanded.repr,
+            QByteArray::from("expanded"),
+        );
         roles
     }
 
