@@ -13,6 +13,13 @@ ApplicationWindow {
     visible: true
     title: qsTr("uhatt")
 
+    // Today plus `days`, formatted as an ISO calendar date.
+    function isoPlusDays(days) {
+        let d = new Date()
+        d.setDate(d.getDate() + days)
+        return Qt.formatDate(d, "yyyy-MM-dd")
+    }
+
     TaskListModel {
         id: tasks
     }
@@ -195,6 +202,8 @@ ApplicationWindow {
                     required property int depth
                     required property bool hasChildren
                     required property bool expanded
+                    required property string deadline
+                    required property bool overdue
 
                     width: list.width
                     leftPadding: 8 + depth * 20
@@ -234,6 +243,50 @@ ApplicationWindow {
                             }
                         }
 
+                        Label {
+                            visible: rowItem.deadline !== ""
+                            text: rowItem.deadline
+                            font.pointSize: 9
+                            color: rowItem.overdue ? "#c0392b" : palette.mid
+                        }
+
+                        ToolButton {
+                            text: "🗓"
+                            ToolTip.text: rowItem.deadline === "" ? qsTr("Set deadline") : qsTr("Change deadline")
+                            ToolTip.visible: hovered
+                            onClicked: deadlineMenu.popup()
+
+                            Menu {
+                                id: deadlineMenu
+                                MenuItem {
+                                    text: qsTr("Today")
+                                    onTriggered: tasks.setDeadline(rowItem.index, root.isoPlusDays(0))
+                                }
+                                MenuItem {
+                                    text: qsTr("Tomorrow")
+                                    onTriggered: tasks.setDeadline(rowItem.index, root.isoPlusDays(1))
+                                }
+                                MenuItem {
+                                    text: qsTr("Next week")
+                                    onTriggered: tasks.setDeadline(rowItem.index, root.isoPlusDays(7))
+                                }
+                                MenuItem {
+                                    text: qsTr("Next month")
+                                    onTriggered: tasks.setDeadline(rowItem.index, root.isoPlusDays(30))
+                                }
+                                MenuItem {
+                                    text: qsTr("Pick date…")
+                                    onTriggered: datePopup.open()
+                                }
+                                MenuSeparator {}
+                                MenuItem {
+                                    text: qsTr("Clear")
+                                    enabled: rowItem.deadline !== ""
+                                    onTriggered: tasks.setDeadline(rowItem.index, "")
+                                }
+                            }
+                        }
+
                         ToolButton {
                             text: "+"
                             ToolTip.text: qsTr("Add subtask")
@@ -246,6 +299,40 @@ ApplicationWindow {
                             ToolTip.text: qsTr("Delete")
                             ToolTip.visible: hovered
                             onClicked: tasks.remove(rowItem.index)
+                        }
+                    }
+
+                    Popup {
+                        id: datePopup
+                        modal: true
+                        anchors.centerIn: Overlay.overlay
+                        padding: 12
+
+                        contentItem: ColumnLayout {
+                            spacing: 8
+                            Label {
+                                text: qsTr("Deadline (YYYY-MM-DD)")
+                            }
+                            TextField {
+                                id: dateInput
+                                Layout.fillWidth: true
+                                inputMask: "9999-99-99"
+                                text: rowItem.deadline
+                            }
+                            RowLayout {
+                                Layout.alignment: Qt.AlignRight
+                                Button {
+                                    text: qsTr("Cancel")
+                                    onClicked: datePopup.close()
+                                }
+                                Button {
+                                    text: qsTr("Set")
+                                    onClicked: {
+                                        tasks.setDeadline(rowItem.index, dateInput.text)
+                                        datePopup.close()
+                                    }
+                                }
+                            }
                         }
                     }
 
