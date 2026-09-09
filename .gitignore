@@ -1,0 +1,21 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Build artifacts
+/build/
+/.cargo/
+
+# cxx-qt: generated QML language-server config (machine-specific paths)
+/.qmlls.ini
+
+# Claude Code - keep shared settings, ignore local overrides
+.claude/settings.local.json
+
+# Editor / OS
+*.swp
+*~
+.idea/
+.vscode/
+.DS_Store
