@@ -1,6 +1,8 @@
 //! uhatt - task and time-tracking desktop app.
 
-mod app;
+mod db;
+mod domain;
+mod tasks_model;
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QUrl};
 

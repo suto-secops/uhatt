@@ -18,6 +18,10 @@ cxx-qt = "0.10"
 # and auditable. Charts are used from QML (`import QtCharts`), not via a
 # cxx-qt-lib binding, so no extra feature is needed for them.
 cxx-qt-lib = { version = "0.10", default-features = false, features = ["qt_gui", "qt_qml"] }
+# `bundled` compiles SQLite from source: no libsqlite3-dev in CI, one fewer
+# moving part. System-sqlite is a PKGBUILD-time question to revisit later.
+rusqlite = { version = "0.37", features = ["bundled"] }
+uuid = { version = "1", features = ["v7"] }
 
 [build-dependencies]
 cxx-qt-build = { version = "0.10", features = ["link_qt_object_files"] }
