@@ -570,6 +570,83 @@ pub fn delete_entry(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
+// --- Time-invested series --------------------------------------------------
+
+/// Calendar bucket for the time-invested graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bucket {
+    Day,
+    Week,
+    Month,
+    Year,
+}
+
+impl Bucket {
+    /// SQLite expression turning a `start_ts` into this bucket's key.
+    fn key_expr(self) -> &'static str {
+        match self {
+            Bucket::Day => "substr(e.start_ts, 1, 10)", // YYYY-MM-DD
+            Bucket::Week => "strftime('%Y-%W', e.start_ts)", // year-week
+            Bucket::Month => "substr(e.start_ts, 1, 7)", // YYYY-MM
+            Bucket::Year => "substr(e.start_ts, 1, 4)", // YYYY
+        }
+    }
+}
+
+/// What the graph is summing over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SeriesTarget {
+    /// Every task.
+    All,
+    /// Tasks in one project.
+    Project(String),
+    /// One task and its subtasks.
+    TaskSubtree(String),
+}
+
+/// `(bucket key, seconds)` pairs for `target`, oldest first. Only buckets with
+/// recorded time appear; a running timer is not counted.
+pub fn time_series(
+    conn: &Connection,
+    target: &SeriesTarget,
+    bucket: Bucket,
+) -> rusqlite::Result<Vec<(String, i64)>> {
+    let key = bucket.key_expr();
+    let (cte, predicate, bind): (&str, &str, Option<&str>) = match target {
+        SeriesTarget::All => ("", "1", None),
+        SeriesTarget::Project(id) => (
+            "",
+            "e.task_id IN (SELECT id FROM tasks WHERE project_id = ?1)",
+            Some(id.as_str()),
+        ),
+        SeriesTarget::TaskSubtree(id) => (
+            "WITH RECURSIVE subtree(id) AS (
+                 SELECT ?1
+               UNION ALL
+                 SELECT t.id FROM tasks t JOIN subtree s ON t.parent_task_id = s.id
+             )",
+            "e.task_id IN (SELECT id FROM subtree)",
+            Some(id.as_str()),
+        ),
+    };
+    let sql = format!(
+        "{cte}
+         SELECT {key} AS bucket,
+                SUM(strftime('%s', e.end_ts) - strftime('%s', e.start_ts))
+         FROM time_entries e
+         WHERE e.end_ts IS NOT NULL AND {predicate}
+         GROUP BY bucket
+         ORDER BY bucket"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let map_row = |r: &rusqlite::Row<'_>| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?));
+    let rows = match bind {
+        Some(id) => stmt.query_map(params![id], map_row)?,
+        None => stmt.query_map([], map_row)?,
+    };
+    rows.collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -914,6 +991,66 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert!(rows[0].entry.end_ts.is_none());
         assert_eq!(rows[0].seconds, 0);
+    }
+
+    #[test]
+    fn time_series_buckets_and_scopes() {
+        let conn = open_in_memory().unwrap();
+        let proj = create_project(&conn, "P").unwrap();
+        let parent = create_task(&conn, "parent", None, Some(&proj.id)).unwrap();
+        let kid = create_task(&conn, "kid", Some(&parent.id), None).unwrap();
+        let other = root(&conn, "other");
+
+        let entry = |task: &str, start: &str, end: &str| {
+            conn.execute(
+                "INSERT INTO time_entries (id, task_id, start_ts, end_ts, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?3)",
+                params![new_id(), task, start, end],
+            )
+            .unwrap();
+        };
+        entry(&parent.id, "2026-03-01T09:00:00", "2026-03-01T10:00:00"); // 1h, day 03-01
+        entry(&kid.id, "2026-03-01T14:00:00", "2026-03-01T14:30:00"); // 30m, day 03-01
+        entry(&kid.id, "2026-03-05T09:00:00", "2026-03-05T11:00:00"); // 2h,  day 03-05
+        entry(&other.id, "2026-03-01T09:00:00", "2026-03-01T12:00:00"); // 3h, other task
+
+        // Subtree = parent + kid.
+        let days = time_series(
+            &conn,
+            &SeriesTarget::TaskSubtree(parent.id.clone()),
+            Bucket::Day,
+        )
+        .unwrap();
+        assert_eq!(
+            days,
+            vec![
+                ("2026-03-01".to_owned(), 5400),
+                ("2026-03-05".to_owned(), 7200),
+            ]
+        );
+
+        // Month bucket rolls the two days together.
+        let months =
+            time_series(&conn, &SeriesTarget::TaskSubtree(parent.id), Bucket::Month).unwrap();
+        assert_eq!(months, vec![("2026-03".to_owned(), 12600)]);
+
+        // Project scope == subtree here (kid inherits P) and excludes `other`.
+        let proj_days = time_series(&conn, &SeriesTarget::Project(proj.id), Bucket::Day).unwrap();
+        assert_eq!(proj_days.iter().map(|(_, s)| s).sum::<i64>(), 12600);
+
+        // All includes `other`.
+        let all = time_series(&conn, &SeriesTarget::All, Bucket::Day).unwrap();
+        assert_eq!(all.iter().map(|(_, s)| s).sum::<i64>(), 12600 + 10800);
+    }
+
+    #[test]
+    fn time_series_ignores_running_timer() {
+        let conn = open_in_memory().unwrap();
+        let t = root(&conn, "t");
+        start_timer(&conn, &t.id).unwrap();
+        assert!(time_series(&conn, &SeriesTarget::All, Bucket::Day)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

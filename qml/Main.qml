@@ -49,6 +49,114 @@ ApplicationWindow {
     EntriesModel {
         id: entries
     }
+    GraphModel {
+        id: graph
+    }
+
+    Dialog {
+        id: graphDialog
+
+        property string subject: ""
+
+        title: qsTr("Time invested — %1").arg(subject)
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        width: 640
+        height: 460
+        standardButtons: Dialog.Close
+
+        contentItem: ColumnLayout {
+            spacing: 10
+
+            RowLayout {
+                Layout.fillWidth: true
+                Label {
+                    text: qsTr("Total: %1").arg(graph.totalText)
+                    font.bold: true
+                }
+                Item {
+                    Layout.fillWidth: true
+                }
+                Repeater {
+                    model: [qsTr("Day"), qsTr("Week"), qsTr("Month"), qsTr("Year")]
+                    delegate: Button {
+                        required property int index
+                        required property string modelData
+                        text: modelData
+                        checkable: true
+                        checked: graph.bucket === index
+                        onClicked: graph.bucket = index
+                    }
+                }
+            }
+
+            Item {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+
+                Label {
+                    anchors.centerIn: parent
+                    visible: barRepeater.count === 0
+                    text: qsTr("No time recorded yet")
+                    opacity: 0.5
+                }
+
+                RowLayout {
+                    anchors.fill: parent
+                    spacing: 3
+                    visible: barRepeater.count > 0
+
+                    Repeater {
+                        id: barRepeater
+                        model: graph
+
+                        delegate: ColumnLayout {
+                            id: bar
+
+                            required property string label
+                            required property real seconds
+                            required property string hoursText
+
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            spacing: 2
+
+                            Label {
+                                Layout.alignment: Qt.AlignHCenter
+                                text: bar.hoursText
+                                font.pointSize: 8
+                            }
+                            Item {
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                Rectangle {
+                                    anchors.bottom: parent.bottom
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    width: Math.max(6, parent.width * 0.6)
+                                    height: parent.height * (graph.maxSeconds > 0 ? bar.seconds / graph.maxSeconds : 0)
+                                    radius: 2
+                                    color: palette.highlight
+
+                                    HoverHandler {
+                                        id: barHover
+                                    }
+                                    ToolTip.text: bar.label + " · " + bar.hoursText
+                                    ToolTip.visible: barHover.hovered
+                                }
+                            }
+                            Label {
+                                Layout.alignment: Qt.AlignHCenter
+                                Layout.maximumWidth: 72
+                                text: bar.label
+                                font.pointSize: 7
+                                elide: Text.ElideRight
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     Dialog {
         id: entriesDialog
@@ -318,6 +426,15 @@ ApplicationWindow {
                     Menu {
                         id: pmenu
                         MenuItem {
+                            text: qsTr("Time graph")
+                            onTriggered: {
+                                graph.targetKind = 1
+                                graph.targetId = pdel.id
+                                graphDialog.subject = pdel.name
+                                graphDialog.open()
+                            }
+                        }
+                        MenuItem {
                             text: qsTr("Rename")
                             onTriggered: {
                                 pdel.editing = true
@@ -415,26 +532,31 @@ ApplicationWindow {
                     required property string deadline
                     required property bool overdue
 
+                    readonly property bool running: rowItem.id === timer.runningTaskId
+
                     width: list.width
-                    leftPadding: 8 + depth * 20
-                    opacity: done ? 0.55 : 1.0
+                    leftPadding: 8 + depth * 18
+                    opacity: done ? 0.5 : 1.0
 
                     contentItem: RowLayout {
-                        spacing: 6
+                        spacing: 4
 
+                        Button {
+                            implicitWidth: 24
+                            implicitHeight: 24
+                            flat: true
+                            padding: 0
+                            visible: rowItem.hasChildren
+                            text: rowItem.expanded ? "–" : "+"
+                            onClicked: tasks.toggleExpanded(rowItem.index)
+                        }
                         Item {
-                            implicitWidth: 18
-                            implicitHeight: 18
-                            ToolButton {
-                                anchors.fill: parent
-                                visible: rowItem.hasChildren
-                                padding: 0
-                                text: rowItem.expanded ? "▾" : "▸"
-                                onClicked: tasks.toggleExpanded(rowItem.index)
-                            }
+                            visible: !rowItem.hasChildren
+                            implicitWidth: 24
                         }
 
                         CheckBox {
+                            padding: 0
                             checked: rowItem.done
                             onToggled: tasks.setDone(rowItem.index, checked)
                         }
@@ -453,23 +575,12 @@ ApplicationWindow {
                             }
                         }
 
-                        ToolButton {
-                            readonly property bool running: rowItem.id === timer.runningTaskId
-                            text: running ? "⏹" : "▶"
-                            ToolTip.text: running ? qsTr("Stop timer") : qsTr("Start timer")
-                            ToolTip.visible: hovered
-                            onClicked: timer.toggle(rowItem.id)
-                        }
-
-                        ToolButton {
-                            text: "🕘"
-                            ToolTip.text: qsTr("Time entries")
-                            ToolTip.visible: hovered
-                            onClicked: {
-                                entries.taskId = rowItem.id
-                                entriesDialog.taskTitle = rowItem.title
-                                entriesDialog.open()
-                            }
+                        Rectangle {
+                            visible: rowItem.running
+                            implicitWidth: 9
+                            implicitHeight: 9
+                            radius: 4.5
+                            color: "#e74c3c"
                         }
 
                         Label {
@@ -479,55 +590,114 @@ ApplicationWindow {
                             color: rowItem.overdue ? "#c0392b" : palette.mid
                         }
 
-                        ToolButton {
-                            text: "🗓"
-                            ToolTip.text: rowItem.deadline === "" ? qsTr("Set deadline") : qsTr("Change deadline")
-                            ToolTip.visible: hovered
-                            onClicked: deadlineMenu.popup()
+                        Button {
+                            implicitWidth: 62
+                            padding: 4
+                            opacity: (rowItem.hovered || rowItem.running) ? 1 : 0
+                            text: rowItem.running ? qsTr("Stop") : qsTr("Start")
+                            onClicked: timer.toggle(rowItem.id)
+                        }
 
-                            Menu {
-                                id: deadlineMenu
-                                MenuItem {
-                                    text: qsTr("Today")
-                                    onTriggered: tasks.setDeadline(rowItem.index, root.isoPlusDays(0))
-                                }
-                                MenuItem {
-                                    text: qsTr("Tomorrow")
-                                    onTriggered: tasks.setDeadline(rowItem.index, root.isoPlusDays(1))
-                                }
-                                MenuItem {
-                                    text: qsTr("Next week")
-                                    onTriggered: tasks.setDeadline(rowItem.index, root.isoPlusDays(7))
-                                }
-                                MenuItem {
-                                    text: qsTr("Next month")
-                                    onTriggered: tasks.setDeadline(rowItem.index, root.isoPlusDays(30))
-                                }
-                                MenuItem {
-                                    text: qsTr("Pick date…")
-                                    onTriggered: datePopup.open()
-                                }
-                                MenuSeparator {}
-                                MenuItem {
-                                    text: qsTr("Clear")
-                                    enabled: rowItem.deadline !== ""
-                                    onTriggered: tasks.setDeadline(rowItem.index, "")
-                                }
+                        Button {
+                            implicitWidth: 30
+                            padding: 4
+                            opacity: rowItem.hovered ? 1 : 0
+                            text: "⋯"
+                            ToolTip.text: qsTr("More actions")
+                            ToolTip.visible: hovered
+                            onClicked: rowMenu.popup()
+                        }
+                    }
+
+                    TapHandler {
+                        acceptedButtons: Qt.RightButton
+                        onTapped: rowMenu.popup()
+                    }
+
+                    Menu {
+                        id: rowMenu
+
+                        MenuItem {
+                            text: qsTr("Add subtask")
+                            onTriggered: tasks.addChild(rowItem.index, qsTr("New subtask"))
+                        }
+                        MenuItem {
+                            text: rowItem.running ? qsTr("Stop timer") : qsTr("Start timer")
+                            onTriggered: timer.toggle(rowItem.id)
+                        }
+                        MenuItem {
+                            text: qsTr("Time entries…")
+                            onTriggered: {
+                                entries.taskId = rowItem.id
+                                entriesDialog.taskTitle = rowItem.title
+                                entriesDialog.open()
+                            }
+                        }
+                        MenuItem {
+                            text: qsTr("Time graph…")
+                            onTriggered: {
+                                graph.targetKind = 2
+                                graph.targetId = rowItem.id
+                                graphDialog.subject = rowItem.title
+                                graphDialog.open()
                             }
                         }
 
-                        ToolButton {
-                            text: "+"
-                            ToolTip.text: qsTr("Add subtask")
-                            ToolTip.visible: hovered
-                            onClicked: tasks.addChild(rowItem.index, qsTr("New subtask"))
+                        Menu {
+                            title: qsTr("Deadline")
+                            MenuItem {
+                                text: qsTr("Today")
+                                onTriggered: tasks.setDeadline(rowItem.index, root.isoPlusDays(0))
+                            }
+                            MenuItem {
+                                text: qsTr("Tomorrow")
+                                onTriggered: tasks.setDeadline(rowItem.index, root.isoPlusDays(1))
+                            }
+                            MenuItem {
+                                text: qsTr("Next week")
+                                onTriggered: tasks.setDeadline(rowItem.index, root.isoPlusDays(7))
+                            }
+                            MenuItem {
+                                text: qsTr("Next month")
+                                onTriggered: tasks.setDeadline(rowItem.index, root.isoPlusDays(30))
+                            }
+                            MenuItem {
+                                text: qsTr("Pick date…")
+                                onTriggered: datePopup.open()
+                            }
+                            MenuSeparator {}
+                            MenuItem {
+                                text: qsTr("Clear")
+                                enabled: rowItem.deadline !== ""
+                                onTriggered: tasks.setDeadline(rowItem.index, "")
+                            }
                         }
 
-                        ToolButton {
-                            text: "✕"
-                            ToolTip.text: qsTr("Delete")
-                            ToolTip.visible: hovered
-                            onClicked: tasks.remove(rowItem.index)
+                        Menu {
+                            id: moveMenu
+                            title: qsTr("Move to project")
+                            MenuItem {
+                                text: qsTr("Unfiled")
+                                onTriggered: tasks.moveToProject(rowItem.index, "")
+                            }
+                            MenuSeparator {}
+                            Instantiator {
+                                model: projects
+                                delegate: MenuItem {
+                                    required property string id
+                                    required property string name
+                                    text: name
+                                    onTriggered: tasks.moveToProject(rowItem.index, id)
+                                }
+                                onObjectAdded: (i, obj) => moveMenu.insertItem(i + 2, obj)
+                                onObjectRemoved: (i, obj) => moveMenu.removeItem(obj)
+                            }
+                        }
+
+                        MenuSeparator {}
+                        MenuItem {
+                            text: qsTr("Delete")
+                            onTriggered: tasks.remove(rowItem.index)
                         }
                     }
 
@@ -561,34 +731,6 @@ ApplicationWindow {
                                         datePopup.close()
                                     }
                                 }
-                            }
-                        }
-                    }
-
-                    TapHandler {
-                        acceptedButtons: Qt.RightButton
-                        onTapped: taskMenu.popup()
-                    }
-                    Menu {
-                        id: taskMenu
-                        Menu {
-                            id: moveMenu
-                            title: qsTr("Move to project")
-                            MenuItem {
-                                text: qsTr("Unfiled")
-                                onTriggered: tasks.moveToProject(rowItem.index, "")
-                            }
-                            MenuSeparator {}
-                            Instantiator {
-                                model: projects
-                                delegate: MenuItem {
-                                    required property string id
-                                    required property string name
-                                    text: name
-                                    onTriggered: tasks.moveToProject(rowItem.index, id)
-                                }
-                                onObjectAdded: (i, obj) => moveMenu.insertItem(i + 2, obj)
-                                onObjectRemoved: (i, obj) => moveMenu.removeItem(obj)
                             }
                         }
                     }
