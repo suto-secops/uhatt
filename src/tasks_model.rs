@@ -1,19 +1,23 @@
-//! `TaskListModel` - a `QAbstractListModel` that exposes tasks to QML.
+//! `TaskListModel` - a `QAbstractListModel` that exposes the task tree to QML
+//! as a flattened, depth-annotated list.
 //!
-//! Backed by an in-memory `Vec<Task>` cache; `data()` only ever reads the
-//! cache (Qt calls it once per visible cell per repaint). Every mutation
-//! writes SQLite first, then reloads the cache inside
-//! `beginResetModel`/`endResetModel`. Reset-per-change is fine at milestone-1
-//! scale; precise row signals can replace it later without touching QML.
+//! The full tree (pre-ordered, from SQLite) lives in `tree`; `visible` is the
+//! subset of row indices currently shown, recomputed whenever the collapsed
+//! set changes. `data()` only ever reads these in-memory structures - Qt calls
+//! it once per visible cell per repaint. Every mutation writes SQLite first,
+//! then reloads inside `beginResetModel`/`endResetModel`. Reset-per-change is
+//! fine at milestone-1 scale; precise row signals can replace it later without
+//! touching QML.
 
 use core::pin::Pin;
+use std::collections::HashSet;
 
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant};
 use rusqlite::Connection;
 
-use crate::db;
-use crate::domain::{Task, TaskStatus};
+use crate::db::{self, TaskNode};
+use crate::domain::TaskStatus;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -48,8 +52,12 @@ pub mod qobject {
         Id,
         Title,
         Done,
-        /// Nesting level; always 0 until the UI renders subtasks.
+        /// Nesting level (0 = root).
         Depth,
+        /// Whether this task has any subtasks.
+        HasChildren,
+        /// Whether this task's subtasks are currently shown.
+        Expanded,
     }
 
     extern "RustQt" {
@@ -66,7 +74,12 @@ pub mod qobject {
         #[qinvokable]
         fn add(self: Pin<&mut TaskListModel>, title: &QString);
 
-        /// Remove the task at `row`.
+        /// Add a subtask under the task at `row`, expanding it. No-op on blank input.
+        #[qinvokable]
+        #[cxx_name = "addChild"]
+        fn add_child(self: Pin<&mut TaskListModel>, row: i32, title: &QString);
+
+        /// Remove the task at `row` (subtasks cascade).
         #[qinvokable]
         fn remove(self: Pin<&mut TaskListModel>, row: i32);
 
@@ -78,6 +91,11 @@ pub mod qobject {
         /// Rename the task at `row`. No-op on blank input.
         #[qinvokable]
         fn rename(self: Pin<&mut TaskListModel>, row: i32, title: &QString);
+
+        /// Collapse an expanded task or expand a collapsed one.
+        #[qinvokable]
+        #[cxx_name = "toggleExpanded"]
+        fn toggle_expanded(self: Pin<&mut TaskListModel>, row: i32);
     }
 
     // QAbstractListModel overrides.
@@ -117,7 +135,30 @@ pub mod qobject {
 #[derive(Default)]
 pub struct TaskListModelRust {
     conn: Option<Connection>,
-    cache: Vec<Task>,
+    tree: Vec<TaskNode>,
+    collapsed: HashSet<String>,
+    /// Indices into `tree` that are currently visible, in display order.
+    visible: Vec<usize>,
+}
+
+/// Walk a pre-ordered tree and return the indices whose ancestors are all
+/// expanded. A collapsed node stays visible; its descendants do not.
+fn compute_visible(tree: &[TaskNode], collapsed: &HashSet<String>) -> Vec<usize> {
+    let mut visible = Vec::with_capacity(tree.len());
+    let mut hidden_below: Option<u32> = None;
+    for (i, node) in tree.iter().enumerate() {
+        if let Some(depth) = hidden_below {
+            if node.depth > depth {
+                continue;
+            }
+            hidden_below = None;
+        }
+        visible.push(i);
+        if node.has_children && collapsed.contains(&node.task.id) {
+            hidden_below = Some(node.depth);
+        }
+    }
+    visible
 }
 
 impl cxx_qt::Initialize for qobject::TaskListModel {
@@ -129,9 +170,12 @@ impl cxx_qt::Initialize for qobject::TaskListModel {
                 db::open_in_memory().expect("in-memory database")
             }
         };
-        let cache = db::list_tasks(&conn).unwrap_or_default();
-        self.as_mut().rust_mut().conn = Some(conn);
-        self.as_mut().rust_mut().cache = cache;
+        let tree = db::list_task_tree(&conn).unwrap_or_default();
+        let visible = compute_visible(&tree, &HashSet::new());
+        let mut rust = self.as_mut().rust_mut();
+        rust.conn = Some(conn);
+        rust.tree = tree;
+        rust.visible = visible;
     }
 }
 
@@ -142,22 +186,39 @@ impl qobject::TaskListModel {
             .expect("TaskListModel used before initialize()")
     }
 
-    /// Re-read every task from SQLite into the cache, wrapped in a model reset.
-    fn reload(mut self: Pin<&mut Self>) {
-        let tasks = db::list_tasks(self.db_conn()).unwrap_or_default();
-        // SAFETY: begin/end are paired around the cache swap.
-        unsafe {
-            self.as_mut().begin_reset_model();
-            self.as_mut().rust_mut().cache = tasks;
-            self.as_mut().end_reset_model();
-        }
+    fn node_at(&self, row: i32) -> Option<&TaskNode> {
+        let row = usize::try_from(row).ok()?;
+        let idx = *self.visible.get(row)?;
+        self.tree.get(idx)
     }
 
-    fn task_id_at(&self, row: i32) -> Option<String> {
-        usize::try_from(row)
-            .ok()
-            .and_then(|i| self.cache.get(i))
-            .map(|t| t.id.clone())
+    fn id_at(&self, row: i32) -> Option<String> {
+        self.node_at(row).map(|n| n.task.id.clone())
+    }
+
+    /// Re-read the tree from SQLite, drop stale collapsed ids, recompute the
+    /// visible set, all wrapped in a model reset.
+    fn reload(mut self: Pin<&mut Self>) {
+        let tree = db::list_task_tree(self.db_conn()).unwrap_or_default();
+        let live: HashSet<&str> = tree.iter().map(|n| n.task.id.as_str()).collect();
+        let collapsed: HashSet<String> = self
+            .collapsed
+            .iter()
+            .filter(|id| live.contains(id.as_str()))
+            .cloned()
+            .collect();
+        let visible = compute_visible(&tree, &collapsed);
+        // SAFETY: begin/end are paired around the state swap.
+        unsafe {
+            self.as_mut().begin_reset_model();
+            {
+                let mut rust = self.as_mut().rust_mut();
+                rust.tree = tree;
+                rust.collapsed = collapsed;
+                rust.visible = visible;
+            }
+            self.as_mut().end_reset_model();
+        }
     }
 
     fn add(self: Pin<&mut Self>, title: &QString) {
@@ -173,8 +234,26 @@ impl qobject::TaskListModel {
         self.reload();
     }
 
+    fn add_child(mut self: Pin<&mut Self>, row: i32, title: &QString) {
+        let title = title.to_string();
+        let title = title.trim();
+        if title.is_empty() {
+            return;
+        }
+        let Some(parent_id) = self.id_at(row) else {
+            return;
+        };
+        if let Err(e) = db::create_task(self.db_conn(), title, Some(&parent_id)) {
+            eprintln!("uhatt: add subtask failed: {e}");
+            return;
+        }
+        // Make sure the new child is visible.
+        self.as_mut().rust_mut().collapsed.remove(&parent_id);
+        self.reload();
+    }
+
     fn remove(self: Pin<&mut Self>, row: i32) {
-        let Some(id) = self.task_id_at(row) else {
+        let Some(id) = self.id_at(row) else {
             return;
         };
         if let Err(e) = db::delete_task(self.db_conn(), &id) {
@@ -185,7 +264,7 @@ impl qobject::TaskListModel {
     }
 
     fn set_done(self: Pin<&mut Self>, row: i32, done: bool) {
-        let Some(id) = self.task_id_at(row) else {
+        let Some(id) = self.id_at(row) else {
             return;
         };
         let status = if done {
@@ -206,7 +285,7 @@ impl qobject::TaskListModel {
         if title.is_empty() {
             return;
         }
-        let Some(id) = self.task_id_at(row) else {
+        let Some(id) = self.id_at(row) else {
             return;
         };
         if let Err(e) = db::rename_task(self.db_conn(), &id, title) {
@@ -216,19 +295,44 @@ impl qobject::TaskListModel {
         self.reload();
     }
 
+    fn toggle_expanded(mut self: Pin<&mut Self>, row: i32) {
+        let Some(node) = self.node_at(row) else {
+            return;
+        };
+        if !node.has_children {
+            return;
+        }
+        let id = node.task.id.clone();
+        {
+            let mut rust = self.as_mut().rust_mut();
+            if !rust.collapsed.remove(&id) {
+                rust.collapsed.insert(id);
+            }
+        }
+        let visible = compute_visible(&self.tree, &self.collapsed);
+        // SAFETY: begin/end are paired around the visible-set swap.
+        unsafe {
+            self.as_mut().begin_reset_model();
+            self.as_mut().rust_mut().visible = visible;
+            self.as_mut().end_reset_model();
+        }
+    }
+
     fn data(&self, index: &QModelIndex, role: i32) -> QVariant {
-        let Some(task) = usize::try_from(index.row())
-            .ok()
-            .and_then(|i| self.cache.get(i))
-        else {
+        let Some(node) = self.node_at(index.row()) else {
             return QVariant::default();
         };
+        let task = &node.task;
 
         match (qobject::Role { repr: role }) {
             qobject::Role::Id => QVariant::from(&QString::from(task.id.as_str())),
             qobject::Role::Title => QVariant::from(&QString::from(task.title.as_str())),
             qobject::Role::Done => QVariant::from(&task.is_done()),
-            qobject::Role::Depth => QVariant::from(&0_i32),
+            qobject::Role::Depth => QVariant::from(&(node.depth as i32)),
+            qobject::Role::HasChildren => QVariant::from(&node.has_children),
+            qobject::Role::Expanded => {
+                QVariant::from(&(node.has_children && !self.collapsed.contains(&task.id)))
+            }
             _ => QVariant::default(),
         }
     }
@@ -239,10 +343,15 @@ impl qobject::TaskListModel {
         roles.insert(qobject::Role::Title.repr, QByteArray::from("title"));
         roles.insert(qobject::Role::Done.repr, QByteArray::from("done"));
         roles.insert(qobject::Role::Depth.repr, QByteArray::from("depth"));
+        roles.insert(
+            qobject::Role::HasChildren.repr,
+            QByteArray::from("hasChildren"),
+        );
+        roles.insert(qobject::Role::Expanded.repr, QByteArray::from("expanded"));
         roles
     }
 
     fn row_count(&self, _parent: &QModelIndex) -> i32 {
-        i32::try_from(self.cache.len()).unwrap_or(i32::MAX)
+        i32::try_from(self.visible.len()).unwrap_or(i32::MAX)
     }
 }
