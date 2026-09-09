@@ -20,17 +20,75 @@ ApplicationWindow {
         return Qt.formatDate(d, "yyyy-MM-dd")
     }
 
+    // Seconds between `sinceIso` and now as HH:MM:SS.
+    function fmtDuration(sinceIso) {
+        if (!sinceIso)
+            return "00:00:00"
+        let secs = Math.max(0, Math.floor((Date.now() - Date.parse(sinceIso)) / 1000))
+        let parts = [Math.floor(secs / 3600), Math.floor(secs % 3600 / 60), secs % 60]
+        return parts.map(n => n < 10 ? "0" + n : "" + n).join(":")
+    }
+
+    // Bumped once a second while a timer runs, to re-evaluate elapsed-time bindings.
+    property int tick: 0
+
     TaskListModel {
         id: tasks
     }
     ProjectListModel {
         id: projects
     }
+    TimerController {
+        id: timer
+    }
 
-    RowLayout {
+    Timer {
+        interval: 1000
+        repeat: true
+        running: timer.runningTaskId !== ""
+        onTriggered: root.tick++
+    }
+
+    ColumnLayout {
         anchors.fill: parent
         anchors.margins: 12
-        spacing: 12
+        spacing: 8
+
+        // ---- Running-timer bar ----------------------------------------
+        Frame {
+            id: timerBar
+            Layout.fillWidth: true
+            visible: timer.runningTaskId !== ""
+
+            RowLayout {
+                anchors.fill: parent
+                spacing: 10
+
+                Label {
+                    text: "⏱"
+                    font.pointSize: 12
+                }
+                Label {
+                    Layout.fillWidth: true
+                    elide: Text.ElideRight
+                    text: timer.runningTaskTitle
+                    font.bold: true
+                }
+                Label {
+                    text: (root.tick, root.fmtDuration(timer.runningSince))
+                    font.family: "monospace"
+                }
+                Button {
+                    text: qsTr("Stop")
+                    onClicked: timer.stop()
+                }
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            spacing: 12
 
         // ---- Sidebar -----------------------------------------------------
         ColumnLayout {
@@ -197,6 +255,7 @@ ApplicationWindow {
                     id: rowItem
 
                     required property int index
+                    required property string id
                     required property string title
                     required property bool done
                     required property int depth
@@ -241,6 +300,14 @@ ApplicationWindow {
                                 if (text !== rowItem.title)
                                     tasks.rename(rowItem.index, text)
                             }
+                        }
+
+                        ToolButton {
+                            readonly property bool running: rowItem.id === timer.runningTaskId
+                            text: running ? "⏹" : "▶"
+                            ToolTip.text: running ? qsTr("Stop timer") : qsTr("Start timer")
+                            ToolTip.visible: hovered
+                            onClicked: timer.toggle(rowItem.id)
                         }
 
                         Label {
@@ -372,6 +439,7 @@ ApplicationWindow {
                     opacity: 0.5
                 }
             }
+        }
         }
     }
 }
