@@ -129,13 +129,42 @@ pub fn get_task(conn: &Connection, id: &str) -> rusqlite::Result<Option<Task>> {
     .optional()
 }
 
-/// All tasks, ordered for display. Flat for now; a recursive CTE takes over
-/// when the UI renders nested subtasks.
-pub fn list_tasks(conn: &Connection) -> rusqlite::Result<Vec<Task>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {TASK_COLUMNS} FROM tasks ORDER BY sort_order, created_at, id"
-    ))?;
-    let rows = stmt.query_map([], row_to_task)?;
+/// A task plus its nesting depth and whether it has any subtasks, in tree
+/// (pre-order) display order. Siblings are ordered by `sort_order`.
+#[derive(Debug, Clone)]
+pub struct TaskNode {
+    pub task: Task,
+    pub depth: u32,
+    pub has_children: bool,
+}
+
+/// All tasks as a depth-annotated, pre-ordered list for the flattened tree view.
+pub fn list_task_tree(conn: &Connection) -> rusqlite::Result<Vec<TaskNode>> {
+    // `sort_path` concatenates each ancestor's zero-padded sort_order so that
+    // ordering the flat result by it yields a correct pre-order traversal.
+    let sql = format!(
+        "WITH RECURSIVE subtree(task_id, depth, sort_path) AS (
+             SELECT id, 0, printf('%020.6f', sort_order)
+             FROM tasks WHERE parent_task_id IS NULL
+           UNION ALL
+             SELECT t.id, s.depth + 1,
+                    s.sort_path || '/' || printf('%020.6f', t.sort_order)
+             FROM tasks t JOIN subtree s ON t.parent_task_id = s.task_id
+         )
+         SELECT {TASK_COLUMNS},
+                subtree.depth,
+                EXISTS(SELECT 1 FROM tasks c WHERE c.parent_task_id = tasks.id)
+         FROM tasks JOIN subtree ON tasks.id = subtree.task_id
+         ORDER BY subtree.sort_path"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |r| {
+        Ok(TaskNode {
+            task: row_to_task(r)?,
+            depth: r.get::<_, i64>(10)? as u32,
+            has_children: r.get::<_, i64>(11)? != 0,
+        })
+    })?;
     rows.collect()
 }
 
@@ -181,6 +210,15 @@ mod tests {
         .unwrap()
     }
 
+    /// Task titles in tree display order.
+    fn titles(conn: &Connection) -> Vec<String> {
+        list_task_tree(conn)
+            .unwrap()
+            .into_iter()
+            .map(|n| n.task.title)
+            .collect()
+    }
+
     #[test]
     fn migrations_reach_head_and_are_idempotent() {
         let conn = open_in_memory().unwrap();
@@ -207,12 +245,7 @@ mod tests {
         assert_eq!(a.title, "write plan");
         assert!(a.sort_order < b.sort_order);
 
-        let titles: Vec<_> = list_tasks(&conn)
-            .unwrap()
-            .into_iter()
-            .map(|t| t.title)
-            .collect();
-        assert_eq!(titles, ["write plan", "ship it"]);
+        assert_eq!(titles(&conn), ["write plan", "ship it"]);
     }
 
     #[test]
@@ -237,10 +270,46 @@ mod tests {
         let conn = open_in_memory().unwrap();
         let parent = create_task(&conn, "parent", None).unwrap();
         create_task(&conn, "child", Some(&parent.id)).unwrap();
-        assert_eq!(list_tasks(&conn).unwrap().len(), 2);
+        assert_eq!(titles(&conn).len(), 2);
 
         delete_task(&conn, &parent.id).unwrap();
-        assert!(list_tasks(&conn).unwrap().is_empty());
+        assert!(titles(&conn).is_empty());
+    }
+
+    #[test]
+    fn task_tree_is_preordered_with_depth_and_child_flags() {
+        let conn = open_in_memory().unwrap();
+        let a = create_task(&conn, "A", None).unwrap();
+        let a1 = create_task(&conn, "A1", Some(&a.id)).unwrap();
+        create_task(&conn, "A1a", Some(&a1.id)).unwrap();
+        create_task(&conn, "A2", Some(&a.id)).unwrap();
+        create_task(&conn, "B", None).unwrap();
+
+        let tree = list_task_tree(&conn).unwrap();
+        let shape: Vec<_> = tree
+            .iter()
+            .map(|n| (n.task.title.as_str(), n.depth, n.has_children))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("A", 0, true),
+                ("A1", 1, true),
+                ("A1a", 2, false),
+                ("A2", 1, false),
+                ("B", 0, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn siblings_keep_insertion_order_within_a_parent() {
+        let conn = open_in_memory().unwrap();
+        let a = create_task(&conn, "A", None).unwrap();
+        let first = create_task(&conn, "first", Some(&a.id)).unwrap();
+        let second = create_task(&conn, "second", Some(&a.id)).unwrap();
+        assert!(first.sort_order < second.sort_order);
+        assert_eq!(titles(&conn), ["A", "first", "second"]);
     }
 
     #[test]
