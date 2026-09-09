@@ -4,6 +4,7 @@ mod db;
 mod domain;
 mod projects_model;
 mod tasks_model;
+mod timer_controller;
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QUrl};
 

@@ -72,6 +72,36 @@ pub struct Project {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntrySource {
+    /// Recorded by the in-app timer.
+    Timer,
+    /// Entered or edited by hand.
+    Manual,
+}
+
+impl EntrySource {
+    pub fn from_db(s: &str) -> Self {
+        match s {
+            "manual" => EntrySource::Manual,
+            _ => EntrySource::Timer,
+        }
+    }
+}
+
+/// A span of time spent on a task. `end_ts == None` marks the one currently
+/// running timer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimeEntry {
+    pub id: Id,
+    pub task_id: Id,
+    pub start_ts: String,
+    pub end_ts: Option<String>,
+    pub source: EntrySource,
+    pub note: String,
+    pub created_at: String,
+}
+
 /// Which tasks the task view should show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectFilter {
