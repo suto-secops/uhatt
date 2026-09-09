@@ -32,6 +32,11 @@ ApplicationWindow {
     // Bumped once a second while a timer runs, to re-evaluate elapsed-time bindings.
     property int tick: 0
 
+    // Now, as "yyyy-MM-dd HH:mm" - the format the entry editor expects.
+    function localNow() {
+        return Qt.formatDateTime(new Date(), "yyyy-MM-dd hh:mm")
+    }
+
     TaskListModel {
         id: tasks
     }
@@ -40,6 +45,152 @@ ApplicationWindow {
     }
     TimerController {
         id: timer
+    }
+    EntriesModel {
+        id: entries
+    }
+
+    Dialog {
+        id: entriesDialog
+
+        property string taskTitle: ""
+
+        title: qsTr("Time entries — %1").arg(taskTitle)
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        width: 540
+        height: 480
+        standardButtons: Dialog.Close
+        onOpened: {
+            addStart.text = root.localNow()
+            addEnd.text = root.localNow()
+            addNote.text = ""
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 8
+
+            ListView {
+                id: entryList
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                model: entries
+                spacing: 4
+
+                delegate: Frame {
+                    id: erow
+
+                    required property int index
+                    required property string start
+                    required property string end
+                    required property string durationText
+                    required property string note
+                    required property bool running
+
+                    width: entryList.width
+                    padding: 6
+
+                    function commit() {
+                        if (!erow.running)
+                            entries.update(erow.index, startField.text, endField.text, noteField.text)
+                    }
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 4
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            TextField {
+                                id: startField
+                                Layout.fillWidth: true
+                                text: erow.start
+                                enabled: !erow.running
+                                onEditingFinished: erow.commit()
+                            }
+                            Label {
+                                text: "→"
+                            }
+                            TextField {
+                                id: endField
+                                Layout.fillWidth: true
+                                text: erow.running ? qsTr("running") : erow.end
+                                enabled: !erow.running
+                                onEditingFinished: erow.commit()
+                            }
+                            Label {
+                                text: erow.durationText
+                                Layout.preferredWidth: 56
+                                horizontalAlignment: Text.AlignRight
+                            }
+                            ToolButton {
+                                text: "✕"
+                                enabled: !erow.running
+                                onClicked: entries.remove(erow.index)
+                            }
+                        }
+                        TextField {
+                            id: noteField
+                            Layout.fillWidth: true
+                            placeholderText: qsTr("note")
+                            text: erow.note
+                            enabled: !erow.running
+                            onEditingFinished: erow.commit()
+                        }
+                    }
+                }
+
+                Label {
+                    anchors.centerIn: parent
+                    visible: entryList.count === 0
+                    text: qsTr("No time recorded yet")
+                    opacity: 0.5
+                }
+            }
+
+            GridLayout {
+                columns: 2
+                columnSpacing: 8
+                Layout.fillWidth: true
+
+                Label {
+                    text: qsTr("Start")
+                }
+                TextField {
+                    id: addStart
+                    Layout.fillWidth: true
+                    placeholderText: "YYYY-MM-DD HH:MM"
+                }
+                Label {
+                    text: qsTr("End")
+                }
+                TextField {
+                    id: addEnd
+                    Layout.fillWidth: true
+                    placeholderText: "YYYY-MM-DD HH:MM"
+                }
+                Label {
+                    text: qsTr("Note")
+                }
+                TextField {
+                    id: addNote
+                    Layout.fillWidth: true
+                }
+            }
+
+            Button {
+                text: qsTr("Add entry")
+                Layout.alignment: Qt.AlignRight
+                enabled: addStart.text.length > 0 && addEnd.text.length > 0
+                onClicked: {
+                    entries.add(addStart.text, addEnd.text, addNote.text)
+                    addStart.text = root.localNow()
+                    addEnd.text = root.localNow()
+                    addNote.text = ""
+                }
+            }
+        }
     }
 
     Timer {
@@ -308,6 +459,17 @@ ApplicationWindow {
                             ToolTip.text: running ? qsTr("Stop timer") : qsTr("Start timer")
                             ToolTip.visible: hovered
                             onClicked: timer.toggle(rowItem.id)
+                        }
+
+                        ToolButton {
+                            text: "🕘"
+                            ToolTip.text: qsTr("Time entries")
+                            ToolTip.visible: hovered
+                            onClicked: {
+                                entries.taskId = rowItem.id
+                                entriesDialog.taskTitle = rowItem.title
+                                entriesDialog.open()
+                            }
                         }
 
                         Label {

@@ -10,10 +10,18 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::domain::{new_id, EntrySource, Project, ProjectFilter, Task, TaskStatus, TimeEntry};
 
-/// SQLite expression producing the current UTC time as an ISO-8601 string.
-const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')";
-
 mod migrations;
+
+/// SQLite expression for the current wall-clock time, `YYYY-MM-DDTHH:MM:SS`.
+///
+/// Timestamps are stored in **local naive time** (no zone) so that timer
+/// entries and hand-entered entries share one clock and their durations add up.
+/// The tradeoff is minor skew around DST changes / travelling between zones,
+/// acceptable for a personal tracker.
+const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime')";
+
+/// SQLite expression for today's local date, `YYYY-MM-DD`.
+const TODAY: &str = "date('now', 'localtime')";
 
 /// Failure opening a database: either creating its directory or SQLite itself.
 #[derive(Debug)]
@@ -126,8 +134,10 @@ pub fn create_task(
         |r| r.get(0),
     )?;
     conn.execute(
-        "INSERT INTO tasks (id, parent_task_id, project_id, title, sort_order, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
+        &format!(
+            "INSERT INTO tasks (id, parent_task_id, project_id, title, sort_order, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, {NOW})"
+        ),
         params![id, parent_id, project_id, title.trim(), sort_order],
     )?;
     Ok(get_task(conn, &id)?.expect("row just inserted"))
@@ -183,7 +193,7 @@ pub fn list_task_tree(
                 subtree.depth,
                 EXISTS(SELECT 1 FROM tasks c WHERE c.parent_task_id = tasks.id),
                 (tasks.deadline IS NOT NULL
-                    AND tasks.deadline < date('now')
+                    AND tasks.deadline < {TODAY}
                     AND tasks.status <> 'done')
          FROM tasks JOIN subtree ON tasks.id = subtree.task_id
          ORDER BY subtree.sort_path"
@@ -259,11 +269,12 @@ pub fn set_task_deadline(
 pub fn set_task_status(conn: &Connection, id: &str, status: TaskStatus) -> rusqlite::Result<()> {
     let done = matches!(status, TaskStatus::Done);
     conn.execute(
-        "UPDATE tasks
-         SET status = ?2,
-             completed_at = CASE WHEN ?3
-                 THEN strftime('%Y-%m-%dT%H:%M:%SZ', 'now') ELSE NULL END
-         WHERE id = ?1",
+        &format!(
+            "UPDATE tasks
+             SET status = ?2,
+                 completed_at = CASE WHEN ?3 THEN {NOW} ELSE NULL END
+             WHERE id = ?1"
+        ),
         params![id, status.as_str(), done],
     )?;
     Ok(())
@@ -306,8 +317,10 @@ fn row_to_project(r: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
 pub fn create_project(conn: &Connection, name: &str) -> rusqlite::Result<Project> {
     let id = new_id();
     conn.execute(
-        "INSERT INTO projects (id, name, created_at)
-         VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
+        &format!(
+            "INSERT INTO projects (id, name, created_at)
+             VALUES (?1, ?2, {NOW})"
+        ),
         params![id, name.trim()],
     )?;
     Ok(get_project(conn, &id)?.expect("row just inserted"))
@@ -439,6 +452,122 @@ pub fn stop_timer(conn: &Connection) -> rusqlite::Result<Option<TimeEntry>> {
         params![entry.id],
     )?;
     get_entry(conn, &entry.id)
+}
+
+/// True for `YYYY-MM-DDTHH:MM` or `YYYY-MM-DDTHH:MM:SS` (a space instead of `T`
+/// is also accepted). Cheap structural check, not a full calendar validation.
+fn is_iso_datetime(s: &str) -> bool {
+    let s = s.trim();
+    let bytes = s.as_bytes();
+    if !(bytes.len() == 16 || bytes.len() == 19) {
+        return false;
+    }
+    let digit = |i: usize| bytes[i].is_ascii_digit();
+    (0..4).all(digit)
+        && bytes[4] == b'-'
+        && (5..7).all(digit)
+        && bytes[7] == b'-'
+        && (8..10).all(digit)
+        && (bytes[10] == b'T' || bytes[10] == b' ')
+        && (11..13).all(digit)
+        && bytes[13] == b':'
+        && (14..16).all(digit)
+        && (bytes.len() == 16 || (bytes[16] == b':' && (17..19).all(digit)))
+}
+
+/// Normalise an accepted datetime to `YYYY-MM-DDTHH:MM:SS` (adds `:00` seconds,
+/// swaps a space separator for `T`). Assumes `is_iso_datetime` already passed.
+fn normalise_datetime(s: &str) -> String {
+    let mut s = s.trim().replace(' ', "T");
+    if s.len() == 16 {
+        s.push_str(":00");
+    }
+    s
+}
+
+/// A time entry plus its duration in seconds (0 while running).
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntryRow {
+    pub entry: TimeEntry,
+    pub seconds: i64,
+}
+
+/// Every time entry for a task, most recent first, each with its duration.
+///
+/// `strftime('%s', ...)` reads the naive timestamps as if UTC; since both ends
+/// of an entry use the same clock, the difference is still correct.
+pub fn list_entries_for_task(conn: &Connection, task_id: &str) -> rusqlite::Result<Vec<EntryRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {ENTRY_COLUMNS},
+                CASE WHEN end_ts IS NULL THEN 0
+                     ELSE strftime('%s', end_ts) - strftime('%s', start_ts) END
+         FROM time_entries
+         WHERE task_id = ?1
+         ORDER BY start_ts DESC, id DESC"
+    ))?;
+    let rows = stmt.query_map(params![task_id], |r| {
+        Ok(EntryRow {
+            entry: row_to_entry(r)?,
+            seconds: r.get::<_, i64>(7)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Add a hand-entered time entry. Both timestamps are required and `start` must
+/// precede `end`; malformed or backwards input yields `Ok(None)`.
+pub fn add_manual_entry(
+    conn: &Connection,
+    task_id: &str,
+    start: &str,
+    end: &str,
+    note: &str,
+) -> rusqlite::Result<Option<TimeEntry>> {
+    if !is_iso_datetime(start) || !is_iso_datetime(end) {
+        return Ok(None);
+    }
+    let (start, end) = (normalise_datetime(start), normalise_datetime(end));
+    if start >= end {
+        return Ok(None);
+    }
+    let id = new_id();
+    conn.execute(
+        &format!(
+            "INSERT INTO time_entries (id, task_id, start_ts, end_ts, source, note, created_at)
+             VALUES (?1, ?2, ?3, ?4, 'manual', ?5, {NOW})"
+        ),
+        params![id, task_id, start, end, note.trim()],
+    )?;
+    get_entry(conn, &id)
+}
+
+/// Edit an existing entry's span and note. Malformed / backwards input is
+/// ignored (returns `Ok(false)`).
+pub fn update_entry(
+    conn: &Connection,
+    id: &str,
+    start: &str,
+    end: &str,
+    note: &str,
+) -> rusqlite::Result<bool> {
+    if !is_iso_datetime(start) || !is_iso_datetime(end) {
+        return Ok(false);
+    }
+    let (start, end) = (normalise_datetime(start), normalise_datetime(end));
+    if start >= end {
+        return Ok(false);
+    }
+    let n = conn.execute(
+        "UPDATE time_entries SET start_ts = ?2, end_ts = ?3, note = ?4 WHERE id = ?1",
+        params![id, start, end, note.trim()],
+    )?;
+    Ok(n > 0)
+}
+
+/// Delete a time entry.
+pub fn delete_entry(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM time_entries WHERE id = ?1", params![id])?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -719,6 +848,72 @@ mod tests {
 
         // Stopping again is a harmless no-op.
         assert!(stop_timer(&conn).unwrap().is_none());
+    }
+
+    #[test]
+    fn manual_entries_add_list_edit_delete() {
+        let conn = open_in_memory().unwrap();
+        let t = root(&conn, "task");
+
+        let e = add_manual_entry(
+            &conn,
+            &t.id,
+            "2026-03-01 09:00",
+            "2026-03-01T10:30",
+            "  morning  ",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(e.start_ts, "2026-03-01T09:00:00");
+        assert_eq!(e.note, "morning");
+
+        let rows = list_entries_for_task(&conn, &t.id).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].seconds, 90 * 60);
+
+        assert!(update_entry(
+            &conn,
+            &e.id,
+            "2026-03-01T09:00",
+            "2026-03-01T09:15",
+            "short"
+        )
+        .unwrap());
+        assert_eq!(
+            list_entries_for_task(&conn, &t.id).unwrap()[0].seconds,
+            15 * 60
+        );
+
+        delete_entry(&conn, &e.id).unwrap();
+        assert!(list_entries_for_task(&conn, &t.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn manual_entry_rejects_bad_input() {
+        let conn = open_in_memory().unwrap();
+        let t = root(&conn, "task");
+        // end before start
+        assert!(
+            add_manual_entry(&conn, &t.id, "2026-03-01T10:00", "2026-03-01T09:00", "")
+                .unwrap()
+                .is_none()
+        );
+        // malformed
+        assert!(add_manual_entry(&conn, &t.id, "March 1", "later", "")
+            .unwrap()
+            .is_none());
+        assert!(list_entries_for_task(&conn, &t.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_entries_includes_the_running_timer_with_zero_duration() {
+        let conn = open_in_memory().unwrap();
+        let t = root(&conn, "task");
+        start_timer(&conn, &t.id).unwrap();
+        let rows = list_entries_for_task(&conn, &t.id).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].entry.end_ts.is_none());
+        assert_eq!(rows[0].seconds, 0);
     }
 
     #[test]
