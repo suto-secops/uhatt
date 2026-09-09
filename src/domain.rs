@@ -60,3 +60,25 @@ impl Task {
         self.status == TaskStatus::Done
     }
 }
+
+/// A project groups root tasks. `tracked` is a display flag (show its time
+/// graph); time is always derived by summing the entries under its tasks.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Project {
+    pub id: Id,
+    pub name: String,
+    pub tracked: bool,
+    pub archived: bool,
+    pub created_at: String,
+}
+
+/// Which tasks the task view should show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectFilter {
+    /// Every task, regardless of project.
+    All,
+    /// Only tasks not assigned to any project.
+    Unfiled,
+    /// Only tasks in the project with this id.
+    Only(Id),
+}
