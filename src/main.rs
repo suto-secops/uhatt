@@ -2,6 +2,7 @@
 
 mod db;
 mod domain;
+mod projects_model;
 mod tasks_model;
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QUrl};
