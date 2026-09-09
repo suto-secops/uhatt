@@ -68,7 +68,7 @@ pub mod qobject {
         #[qml_element]
         #[base = QAbstractListModel]
         // "" = every task, "unfiled" = tasks with no project, otherwise a project id.
-        #[qproperty(QString, project_filter, cxx_name = "projectFilter", READ, WRITE = set_project_filter)]
+        #[qproperty(QString, project_filter, cxx_name = "projectFilter", READ, WRITE = set_project_filter, NOTIFY)]
         type TaskListModel = super::TaskListModelRust;
     }
 
@@ -259,6 +259,10 @@ impl qobject::TaskListModel {
             return;
         }
         self.as_mut().rust_mut().project_filter = value;
+        // Custom WRITE setters must emit the change themselves - cxx-qt only
+        // auto-emits for auto-generated setters. Without this the sidebar
+        // highlight (bound to `projectFilter`) never follows the selection.
+        self.as_mut().project_filter_changed();
         self.reload();
     }
 

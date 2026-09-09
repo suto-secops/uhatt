@@ -44,7 +44,7 @@ pub mod qobject {
         #[qobject]
         #[qml_element]
         #[base = QAbstractListModel]
-        #[qproperty(QString, task_id, cxx_name = "taskId", READ, WRITE = set_task_id)]
+        #[qproperty(QString, task_id, cxx_name = "taskId", READ, WRITE = set_task_id, NOTIFY)]
         type EntriesModel = super::EntriesModelRust;
     }
 
@@ -163,6 +163,9 @@ impl qobject::EntriesModel {
 
     fn set_task_id(mut self: Pin<&mut Self>, value: QString) {
         self.as_mut().rust_mut().task_id = value;
+        // Custom WRITE setter: emit the change ourselves (cxx-qt only auto-emits
+        // for auto-generated setters).
+        self.as_mut().task_id_changed();
         self.reload();
     }
 
