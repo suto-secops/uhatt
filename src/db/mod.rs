@@ -164,34 +164,60 @@ pub struct TaskNode {
     pub overdue: bool,
 }
 
+fn map_task_node(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskNode> {
+    Ok(TaskNode {
+        task: row_to_task(r)?,
+        depth: r.get::<_, i64>(10)? as u32,
+        has_children: r.get::<_, i64>(11)? != 0,
+        overdue: r.get::<_, i64>(12)? != 0,
+    })
+}
+
 /// All tasks matching `filter` as a depth-annotated, pre-ordered list for the
 /// flattened tree view.
 ///
 /// The filter is applied only to root tasks: subtasks inherit their parent's
 /// project, so a whole subtree always belongs to one project.
+///
+/// When `include_done` is false, completed tasks are omitted - and because the
+/// recursive walk stops at them, so is anything nested under a completed task
+/// (finishing a parent hides its whole branch). `has_children` reflects the
+/// same filter, so the disclosure control never opens onto nothing.
 pub fn list_task_tree(
     conn: &Connection,
     filter: &ProjectFilter,
+    include_done: bool,
 ) -> rusqlite::Result<Vec<TaskNode>> {
     let (root_predicate, bind): (&str, Option<&str>) = match filter {
         ProjectFilter::All => ("1", None),
         ProjectFilter::Unfiled => ("project_id IS NULL", None),
         ProjectFilter::Only(id) => ("project_id = ?1", Some(id.as_str())),
     };
+    let (root_done, t_done, c_done) = if include_done {
+        ("", "", "")
+    } else {
+        (
+            "AND status <> 'done'",
+            "AND t.status <> 'done'",
+            "AND c.status <> 'done'",
+        )
+    };
     // `sort_path` concatenates each ancestor's zero-padded sort_order so that
     // ordering the flat result by it yields a correct pre-order traversal.
     let sql = format!(
         "WITH RECURSIVE subtree(task_id, depth, sort_path) AS (
              SELECT id, 0, printf('%020.6f', sort_order)
-             FROM tasks WHERE parent_task_id IS NULL AND {root_predicate}
+             FROM tasks WHERE parent_task_id IS NULL AND {root_predicate} {root_done}
            UNION ALL
              SELECT t.id, s.depth + 1,
                     s.sort_path || '/' || printf('%020.6f', t.sort_order)
              FROM tasks t JOIN subtree s ON t.parent_task_id = s.task_id
+             WHERE 1 {t_done}
          )
          SELECT {TASK_COLUMNS},
                 subtree.depth,
-                EXISTS(SELECT 1 FROM tasks c WHERE c.parent_task_id = tasks.id),
+                EXISTS(SELECT 1 FROM tasks c
+                       WHERE c.parent_task_id = tasks.id {c_done}),
                 (tasks.deadline IS NOT NULL
                     AND tasks.deadline < {TODAY}
                     AND tasks.status <> 'done')
@@ -199,18 +225,26 @@ pub fn list_task_tree(
          ORDER BY subtree.sort_path"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let map_row = |r: &rusqlite::Row<'_>| -> rusqlite::Result<TaskNode> {
-        Ok(TaskNode {
-            task: row_to_task(r)?,
-            depth: r.get::<_, i64>(10)? as u32,
-            has_children: r.get::<_, i64>(11)? != 0,
-            overdue: r.get::<_, i64>(12)? != 0,
-        })
-    };
     let rows = match bind {
-        Some(id) => stmt.query_map(params![id], map_row)?,
-        None => stmt.query_map([], map_row)?,
+        Some(id) => stmt.query_map(params![id], map_task_node)?,
+        None => stmt.query_map([], map_task_node)?,
     };
+    rows.collect()
+}
+
+/// Every completed task as a flat list (depth 0), most-recently-finished first.
+///
+/// The "Finished" view is deliberately not a tree: a done task's place in the
+/// hierarchy matters less than when it was done.
+pub fn list_finished_tasks(conn: &Connection) -> rusqlite::Result<Vec<TaskNode>> {
+    let sql = format!(
+        "SELECT {TASK_COLUMNS}, 0, 0, 0
+         FROM tasks
+         WHERE status = 'done'
+         ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], map_task_node)?;
     rows.collect()
 }
 
@@ -670,7 +704,7 @@ mod tests {
 
     /// Task titles in tree display order.
     fn titles(conn: &Connection) -> Vec<String> {
-        list_task_tree(conn, &ProjectFilter::All)
+        list_task_tree(conn, &ProjectFilter::All, true)
             .unwrap()
             .into_iter()
             .map(|n| n.task.title)
@@ -743,7 +777,7 @@ mod tests {
         child(&conn, "A2", &a.id);
         root(&conn, "B");
 
-        let tree = list_task_tree(&conn, &ProjectFilter::All).unwrap();
+        let tree = list_task_tree(&conn, &ProjectFilter::All, true).unwrap();
         let shape: Vec<_> = tree
             .iter()
             .map(|n| (n.task.title.as_str(), n.depth, n.has_children))
@@ -779,6 +813,60 @@ mod tests {
     }
 
     #[test]
+    fn done_tasks_hidden_unless_included_and_listed_separately() {
+        let conn = open_in_memory().unwrap();
+        let keep = root(&conn, "keep");
+        let parent = root(&conn, "parent");
+        let buried = child(&conn, "buried", &parent.id);
+        let finished = root(&conn, "finished");
+
+        set_task_status(&conn, &finished.id, TaskStatus::Done).unwrap();
+        set_task_status(&conn, &parent.id, TaskStatus::Done).unwrap();
+
+        // Active view: no done task, and nothing nested under a done parent.
+        let active: Vec<_> = list_task_tree(&conn, &ProjectFilter::All, false)
+            .unwrap()
+            .into_iter()
+            .map(|n| n.task.title)
+            .collect();
+        assert_eq!(active, ["keep"]);
+
+        // Including done brings the whole tree back.
+        let all: Vec<_> = list_task_tree(&conn, &ProjectFilter::All, true)
+            .unwrap()
+            .into_iter()
+            .map(|n| n.task.title)
+            .collect();
+        assert_eq!(all, ["keep", "parent", "buried", "finished"]);
+
+        // The finished list is flat and holds only completed tasks.
+        let done: Vec<_> = list_finished_tasks(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|n| (n.task.title, n.depth))
+            .collect();
+        assert_eq!(done.len(), 2);
+        assert!(done.contains(&("finished".to_owned(), 0)));
+        assert!(done.contains(&("parent".to_owned(), 0)));
+        let _ = (keep, buried);
+    }
+
+    #[test]
+    fn has_children_ignores_done_children_in_active_view() {
+        let conn = open_in_memory().unwrap();
+        let parent = root(&conn, "parent");
+        let only_kid = child(&conn, "kid", &parent.id);
+        set_task_status(&conn, &only_kid.id, TaskStatus::Done).unwrap();
+
+        let active = list_task_tree(&conn, &ProjectFilter::All, false).unwrap();
+        assert_eq!(active.len(), 1);
+        assert!(
+            !active[0].has_children,
+            "parent's only child is done, so no disclosure control"
+        );
+    }
+
+    #[test]
     fn only_one_running_timer_allowed() {
         let conn = open_in_memory().unwrap();
         let t = root(&conn, "task");
@@ -811,14 +899,14 @@ mod tests {
             Some(work.id.clone())
         );
 
-        let in_work: Vec<_> = list_task_tree(&conn, &ProjectFilter::Only(work.id.clone()))
+        let in_work: Vec<_> = list_task_tree(&conn, &ProjectFilter::Only(work.id.clone()), true)
             .unwrap()
             .into_iter()
             .map(|n| n.task.title)
             .collect();
         assert_eq!(in_work, ["filed", "sub"]);
 
-        let unfiled: Vec<_> = list_task_tree(&conn, &ProjectFilter::Unfiled)
+        let unfiled: Vec<_> = list_task_tree(&conn, &ProjectFilter::Unfiled, true)
             .unwrap()
             .into_iter()
             .map(|n| n.task.title)
@@ -858,7 +946,7 @@ mod tests {
     }
 
     fn node(conn: &Connection, id: &str) -> TaskNode {
-        list_task_tree(conn, &ProjectFilter::All)
+        list_task_tree(conn, &ProjectFilter::All, true)
             .unwrap()
             .into_iter()
             .find(|n| n.task.id == id)

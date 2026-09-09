@@ -67,8 +67,12 @@ pub mod qobject {
         #[qobject]
         #[qml_element]
         #[base = QAbstractListModel]
-        // "" = every task, "unfiled" = tasks with no project, otherwise a project id.
+        // "" = active tasks, "unfiled" = active + no project, "finished" = the
+        // completed-tasks list, otherwise a project id (active tasks in it).
         #[qproperty(QString, project_filter, cxx_name = "projectFilter", READ, WRITE = set_project_filter, NOTIFY)]
+        // When true, completed tasks also show in the "", "unfiled" and project
+        // views. The "finished" view is unaffected (it is always only done).
+        #[qproperty(bool, show_done, cxx_name = "showDone", READ, WRITE = set_show_done, NOTIFY)]
         type TaskListModel = super::TaskListModelRust;
     }
 
@@ -78,6 +82,10 @@ pub mod qobject {
         /// Change which project's tasks are shown and reload.
         #[cxx_name = "setProjectFilter"]
         fn set_project_filter(self: Pin<&mut TaskListModel>, value: QString);
+
+        /// Toggle whether completed tasks appear in the normal views.
+        #[cxx_name = "setShowDone"]
+        fn set_show_done(self: Pin<&mut TaskListModel>, value: bool);
 
         /// Append a new root task in the current project filter (if any). No-op on blank input.
         #[qinvokable]
@@ -158,13 +166,18 @@ pub struct TaskListModelRust {
     conn: Option<Connection>,
     /// Backs the `projectFilter` Q_PROPERTY (see [`parse_filter`]).
     project_filter: QString,
+    /// Backs the `showDone` Q_PROPERTY.
+    show_done: bool,
     tree: Vec<TaskNode>,
     collapsed: HashSet<String>,
     /// Indices into `tree` that are currently visible, in display order.
     visible: Vec<usize>,
 }
 
-/// Interpret the `projectFilter` string.
+/// The special `projectFilter` value that selects the completed-tasks list.
+const FINISHED: &str = "finished";
+
+/// Interpret a non-`finished` `projectFilter` string as a project scope.
 fn parse_filter(s: &str) -> ProjectFilter {
     match s {
         "" => ProjectFilter::All,
@@ -202,7 +215,7 @@ impl cxx_qt::Initialize for qobject::TaskListModel {
                 db::open_in_memory().expect("in-memory database")
             }
         };
-        let tree = db::list_task_tree(&conn, &ProjectFilter::All).unwrap_or_default();
+        let tree = db::list_task_tree(&conn, &ProjectFilter::All, false).unwrap_or_default();
         let visible = compute_visible(&tree, &HashSet::new());
         let mut rust = self.as_mut().rust_mut();
         rust.conn = Some(conn);
@@ -231,8 +244,13 @@ impl qobject::TaskListModel {
     /// Re-read the tree from SQLite, drop stale collapsed ids, recompute the
     /// visible set, all wrapped in a model reset.
     fn reload(mut self: Pin<&mut Self>) {
-        let filter = parse_filter(&self.project_filter.to_string());
-        let tree = db::list_task_tree(self.db_conn(), &filter).unwrap_or_default();
+        let filter_str = self.project_filter.to_string();
+        let tree = if filter_str == FINISHED {
+            db::list_finished_tasks(self.db_conn())
+        } else {
+            db::list_task_tree(self.db_conn(), &parse_filter(&filter_str), self.show_done)
+        }
+        .unwrap_or_default();
         let live: HashSet<&str> = tree.iter().map(|n| n.task.id.as_str()).collect();
         let collapsed: HashSet<String> = self
             .collapsed
@@ -266,14 +284,24 @@ impl qobject::TaskListModel {
         self.reload();
     }
 
+    fn set_show_done(mut self: Pin<&mut Self>, value: bool) {
+        if self.show_done == value {
+            return;
+        }
+        self.as_mut().rust_mut().show_done = value;
+        self.as_mut().show_done_changed();
+        self.reload();
+    }
+
     fn add(self: Pin<&mut Self>, title: &QString) {
         let title = title.to_string();
         let title = title.trim();
-        if title.is_empty() {
+        let filter_str = self.project_filter.to_string();
+        if title.is_empty() || filter_str == FINISHED {
             return;
         }
         // New root tasks land in the currently filtered project, if any.
-        let project = match parse_filter(&self.project_filter.to_string()) {
+        let project = match parse_filter(&filter_str) {
             ProjectFilter::Only(id) => Some(id),
             _ => None,
         };

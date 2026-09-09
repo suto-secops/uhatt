@@ -406,6 +406,7 @@ ApplicationWindow {
                 model: [
                     { key: "", label: qsTr("All tasks") },
                     { key: "unfiled", label: qsTr("Unfiled") },
+                    { key: "finished", label: qsTr("Finished") },
                 ]
                 delegate: ItemDelegate {
                     required property var modelData
@@ -414,6 +415,15 @@ ApplicationWindow {
                     highlighted: tasks.projectFilter === modelData.key
                     onClicked: tasks.projectFilter = modelData.key
                 }
+            }
+
+            CheckBox {
+                Layout.fillWidth: true
+                text: qsTr("Show finished")
+                font.pointSize: 9
+                visible: tasks.projectFilter !== "finished"
+                checked: tasks.showDone
+                onToggled: tasks.showDone = checked
             }
 
             MenuSeparator {
@@ -531,6 +541,8 @@ ApplicationWindow {
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 8
+                // No adding tasks while looking at the finished list.
+                visible: tasks.projectFilter !== "finished"
 
                 TextField {
                     id: input
