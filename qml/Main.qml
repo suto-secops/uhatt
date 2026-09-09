@@ -323,9 +323,18 @@ ApplicationWindow {
                 anchors.fill: parent
                 spacing: 10
 
-                Label {
-                    text: "⏱"
-                    font.pointSize: 12
+                // Pulsing dot - stands in for a clock glyph the font lacks.
+                Rectangle {
+                    implicitWidth: 10
+                    implicitHeight: 10
+                    radius: 5
+                    color: "#e74c3c"
+                    SequentialAnimation on opacity {
+                        running: timerBar.visible
+                        loops: Animation.Infinite
+                        NumberAnimation { to: 0.3; duration: 700 }
+                        NumberAnimation { to: 1.0; duration: 700 }
+                    }
                 }
                 Label {
                     Layout.fillWidth: true
@@ -606,13 +615,32 @@ ApplicationWindow {
                         }
 
                         Button {
+                            id: moreButton
                             implicitWidth: 30
                             padding: 4
-                            opacity: rowItem.hovered ? 1 : 0.35
-                            text: "⋯"
+                            opacity: (rowItem.hovered || down) ? 1 : 0.35
                             ToolTip.text: qsTr("More actions")
                             ToolTip.visible: hovered
                             onClicked: rowMenu.popup()
+
+                            // The system font has no "⋯" glyph, so draw the dots.
+                            contentItem: Item {
+                                implicitWidth: 14
+                                implicitHeight: 14
+                                Row {
+                                    anchors.centerIn: parent
+                                    spacing: 2
+                                    Repeater {
+                                        model: 3
+                                        delegate: Rectangle {
+                                            width: 3
+                                            height: 3
+                                            radius: 1.5
+                                            color: palette.buttonText
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -661,15 +689,7 @@ ApplicationWindow {
                                 onTriggered: tasks.setDeadline(rowItem.index, root.isoPlusDays(1))
                             }
                             MenuItem {
-                                text: qsTr("Next week")
-                                onTriggered: tasks.setDeadline(rowItem.index, root.isoPlusDays(7))
-                            }
-                            MenuItem {
-                                text: qsTr("Next month")
-                                onTriggered: tasks.setDeadline(rowItem.index, root.isoPlusDays(30))
-                            }
-                            MenuItem {
-                                text: qsTr("Pick date…")
+                                text: qsTr("Pick a date…")
                                 onTriggered: datePopup.open()
                             }
                             MenuSeparator {}

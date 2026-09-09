@@ -45,10 +45,10 @@ pub mod qobject {
         #[qml_element]
         #[base = QAbstractListModel]
         // 0 = all tasks, 1 = project, 2 = task subtree.
-        #[qproperty(i32, target_kind, cxx_name = "targetKind", READ, WRITE = set_target_kind)]
-        #[qproperty(QString, target_id, cxx_name = "targetId", READ, WRITE = set_target_id)]
+        #[qproperty(i32, target_kind, cxx_name = "targetKind", READ, WRITE = set_target_kind, NOTIFY)]
+        #[qproperty(QString, target_id, cxx_name = "targetId", READ, WRITE = set_target_id, NOTIFY)]
         // 0 = day, 1 = week, 2 = month, 3 = year.
-        #[qproperty(i32, bucket, READ, WRITE = set_bucket)]
+        #[qproperty(i32, bucket, READ, WRITE = set_bucket, NOTIFY)]
         // Largest bucket total, for scaling bars. Driven by the model.
         #[qproperty(f64, max_seconds, cxx_name = "maxSeconds")]
         // Sum across all shown buckets. Driven by the model.
@@ -178,18 +178,24 @@ impl qobject::GraphModel {
             .set_total_text(QString::from(human_hours(total).as_str()));
     }
 
+    // Custom WRITE setters must emit their own change signal - cxx-qt only
+    // auto-emits for auto-generated setters. Without the emit, QML bindings on
+    // these properties (e.g. the bucket toggle's checked state) go stale.
     fn set_target_kind(mut self: Pin<&mut Self>, value: i32) {
         self.as_mut().rust_mut().target_kind = value;
+        self.as_mut().target_kind_changed();
         self.reload();
     }
 
     fn set_target_id(mut self: Pin<&mut Self>, value: QString) {
         self.as_mut().rust_mut().target_id = value;
+        self.as_mut().target_id_changed();
         self.reload();
     }
 
     fn set_bucket(mut self: Pin<&mut Self>, value: i32) {
         self.as_mut().rust_mut().bucket = value.clamp(0, 3);
+        self.as_mut().bucket_changed();
         self.reload();
     }
 
