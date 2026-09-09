@@ -36,7 +36,6 @@ pub mod qobject {
         Start,
         End,
         DurationText,
-        Note,
         Running,
     }
 
@@ -45,6 +44,8 @@ pub mod qobject {
         #[qml_element]
         #[base = QAbstractListModel]
         #[qproperty(QString, task_id, cxx_name = "taskId", READ, WRITE = set_task_id, NOTIFY)]
+        // Sum of all listed entries' durations, e.g. "3h 20m". Driven by the model.
+        #[qproperty(QString, total_text, cxx_name = "totalText")]
         type EntriesModel = super::EntriesModelRust;
     }
 
@@ -57,17 +58,11 @@ pub mod qobject {
 
         /// Add a manual entry (`YYYY-MM-DD HH:MM` timestamps). No-op on bad input.
         #[qinvokable]
-        fn add(self: Pin<&mut EntriesModel>, start: &QString, end: &QString, note: &QString);
+        fn add(self: Pin<&mut EntriesModel>, start: &QString, end: &QString);
 
         /// Edit the entry at `row`. No-op on bad input.
         #[qinvokable]
-        fn update(
-            self: Pin<&mut EntriesModel>,
-            row: i32,
-            start: &QString,
-            end: &QString,
-            note: &QString,
-        );
+        fn update(self: Pin<&mut EntriesModel>, row: i32, start: &QString, end: &QString);
 
         /// Delete the entry at `row`.
         #[qinvokable]
@@ -110,19 +105,34 @@ pub mod qobject {
 pub struct EntriesModelRust {
     conn: Option<Connection>,
     task_id: QString,
+    total_text: QString,
     cache: Vec<EntryRow>,
 }
 
 /// Seconds as a compact `Hh Mm` / `Mm` / `Ss` string.
 fn human_duration(secs: i64) -> String {
     if secs <= 0 {
-        return "—".to_owned();
+        return "-".to_owned();
     }
     let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
     match (h, m) {
         (0, 0) => format!("{s}s"),
         (0, _) => format!("{m}m"),
         _ => format!("{h}h {m:02}m"),
+    }
+}
+
+/// Running total of a task's entries. Unlike [`human_duration`] this keeps a
+/// zero readable ("0m") rather than showing a dash.
+fn human_total(secs: i64) -> String {
+    if secs <= 0 {
+        return "0m".to_owned();
+    }
+    let (h, m) = (secs / 3600, (secs % 3600) / 60);
+    if h == 0 {
+        format!("{m}m")
+    } else {
+        format!("{h}h {m:02}m")
     }
 }
 
@@ -153,12 +163,15 @@ impl qobject::EntriesModel {
         } else {
             db::list_entries_for_task(self.db_conn(), &task_id).unwrap_or_default()
         };
+        let total: i64 = entries.iter().map(|r| r.seconds).sum();
         // SAFETY: begin/end are paired around the cache swap.
         unsafe {
             self.as_mut().begin_reset_model();
             self.as_mut().rust_mut().cache = entries;
             self.as_mut().end_reset_model();
         }
+        self.as_mut()
+            .set_total_text(QString::from(human_total(total).as_str()));
     }
 
     fn set_task_id(mut self: Pin<&mut Self>, value: QString) {
@@ -176,7 +189,7 @@ impl qobject::EntriesModel {
             .map(|r| r.entry.id.clone())
     }
 
-    fn add(self: Pin<&mut Self>, start: &QString, end: &QString, note: &QString) {
+    fn add(self: Pin<&mut Self>, start: &QString, end: &QString) {
         let task_id = self.task_id.to_string();
         if task_id.is_empty() {
             return;
@@ -186,7 +199,7 @@ impl qobject::EntriesModel {
             &task_id,
             &start.to_string(),
             &end.to_string(),
-            &note.to_string(),
+            "",
         ) {
             Ok(Some(_)) => self.reload(),
             Ok(None) => eprintln!("uhatt: manual entry rejected (check the times)"),
@@ -194,7 +207,7 @@ impl qobject::EntriesModel {
         }
     }
 
-    fn update(self: Pin<&mut Self>, row: i32, start: &QString, end: &QString, note: &QString) {
+    fn update(self: Pin<&mut Self>, row: i32, start: &QString, end: &QString) {
         let Some(id) = self.id_at(row) else {
             return;
         };
@@ -203,7 +216,7 @@ impl qobject::EntriesModel {
             &id,
             &start.to_string(),
             &end.to_string(),
-            &note.to_string(),
+            "",
         ) {
             Ok(true) => self.reload(),
             Ok(false) => eprintln!("uhatt: entry edit rejected (check the times)"),
@@ -239,7 +252,6 @@ impl qobject::EntriesModel {
             qobject::EntryRole::DurationText => {
                 QVariant::from(&QString::from(human_duration(row.seconds).as_str()))
             }
-            qobject::EntryRole::Note => QVariant::from(&QString::from(e.note.as_str())),
             qobject::EntryRole::Running => QVariant::from(&e.end_ts.is_none()),
             _ => QVariant::default(),
         }
@@ -254,7 +266,6 @@ impl qobject::EntriesModel {
             qobject::EntryRole::DurationText.repr,
             QByteArray::from("durationText"),
         );
-        roles.insert(qobject::EntryRole::Note.repr, QByteArray::from("note"));
         roles.insert(
             qobject::EntryRole::Running.repr,
             QByteArray::from("running"),

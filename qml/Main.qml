@@ -162,24 +162,47 @@ ApplicationWindow {
         id: entriesDialog
 
         property string taskTitle: ""
+        // The list and the add-form are never shown together.
+        property bool adding: false
 
         title: qsTr("Time entries — %1").arg(taskTitle)
         modal: true
         anchors.centerIn: Overlay.overlay
         width: 540
-        height: 480
+        height: 460
         standardButtons: Dialog.Close
         onOpened: {
+            entriesDialog.adding = false
             addStart.text = root.localNow()
             addEnd.text = root.localNow()
-            addNote.text = ""
         }
 
         contentItem: ColumnLayout {
             spacing: 8
 
+            // ---- Header: total + add toggle -----------------------------
+            RowLayout {
+                Layout.fillWidth: true
+                Label {
+                    text: qsTr("Total: %1").arg(entries.totalText)
+                    font.bold: true
+                }
+                Item { Layout.fillWidth: true }
+                Button {
+                    visible: !entriesDialog.adding
+                    text: qsTr("Add entry")
+                    onClicked: {
+                        addStart.text = root.localNow()
+                        addEnd.text = root.localNow()
+                        entriesDialog.adding = true
+                    }
+                }
+            }
+
+            // ---- List of entries --------------------------------------
             ListView {
                 id: entryList
+                visible: !entriesDialog.adding
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 clip: true
@@ -193,7 +216,6 @@ ApplicationWindow {
                     required property string start
                     required property string end
                     required property string durationText
-                    required property string note
                     required property bool running
 
                     width: entryList.width
@@ -201,50 +223,57 @@ ApplicationWindow {
 
                     function commit() {
                         if (!erow.running)
-                            entries.update(erow.index, startField.text, endField.text, noteField.text)
+                            entries.update(erow.index, startField.text, endField.text)
                     }
 
-                    ColumnLayout {
+                    RowLayout {
                         anchors.fill: parent
-                        spacing: 4
+                        spacing: 6
 
-                        RowLayout {
-                            Layout.fillWidth: true
-                            TextField {
-                                id: startField
-                                Layout.fillWidth: true
-                                text: erow.start
-                                enabled: !erow.running
-                                onEditingFinished: erow.commit()
-                            }
-                            Label {
-                                text: "→"
-                            }
-                            TextField {
-                                id: endField
-                                Layout.fillWidth: true
-                                text: erow.running ? qsTr("running") : erow.end
-                                enabled: !erow.running
-                                onEditingFinished: erow.commit()
-                            }
-                            Label {
-                                text: erow.durationText
-                                Layout.preferredWidth: 56
-                                horizontalAlignment: Text.AlignRight
-                            }
-                            ToolButton {
-                                text: "✕"
-                                enabled: !erow.running
-                                onClicked: entries.remove(erow.index)
-                            }
-                        }
                         TextField {
-                            id: noteField
+                            id: startField
                             Layout.fillWidth: true
-                            placeholderText: qsTr("note")
-                            text: erow.note
+                            text: erow.start
                             enabled: !erow.running
                             onEditingFinished: erow.commit()
+                        }
+                        Label { text: qsTr("to") }
+                        TextField {
+                            id: endField
+                            Layout.fillWidth: true
+                            text: erow.running ? qsTr("running") : erow.end
+                            enabled: !erow.running
+                            onEditingFinished: erow.commit()
+                        }
+                        Label {
+                            text: erow.durationText
+                            Layout.preferredWidth: 52
+                            horizontalAlignment: Text.AlignRight
+                            opacity: 0.8
+                        }
+                        // Drawn "×" - the font has no cross glyph.
+                        Button {
+                            implicitWidth: 26
+                            implicitHeight: 26
+                            padding: 0
+                            enabled: !erow.running
+                            ToolTip.text: qsTr("Delete entry")
+                            ToolTip.visible: hovered
+                            onClicked: entries.remove(erow.index)
+                            contentItem: Item {
+                                Repeater {
+                                    model: 2
+                                    delegate: Rectangle {
+                                        required property int index
+                                        anchors.centerIn: parent
+                                        width: 12
+                                        height: 2
+                                        radius: 1
+                                        color: palette.buttonText
+                                        rotation: index === 0 ? 45 : -45
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -257,45 +286,49 @@ ApplicationWindow {
                 }
             }
 
-            GridLayout {
-                columns: 2
-                columnSpacing: 8
+            // ---- Add form (replaces the list) -------------------------
+            ColumnLayout {
+                visible: entriesDialog.adding
                 Layout.fillWidth: true
+                Layout.fillHeight: true
+                spacing: 8
 
-                Label {
-                    text: qsTr("Start")
-                }
-                TextField {
-                    id: addStart
+                GridLayout {
+                    columns: 2
+                    columnSpacing: 8
+                    rowSpacing: 6
                     Layout.fillWidth: true
-                    placeholderText: "YYYY-MM-DD HH:MM"
-                }
-                Label {
-                    text: qsTr("End")
-                }
-                TextField {
-                    id: addEnd
-                    Layout.fillWidth: true
-                    placeholderText: "YYYY-MM-DD HH:MM"
-                }
-                Label {
-                    text: qsTr("Note")
-                }
-                TextField {
-                    id: addNote
-                    Layout.fillWidth: true
-                }
-            }
 
-            Button {
-                text: qsTr("Add entry")
-                Layout.alignment: Qt.AlignRight
-                enabled: addStart.text.length > 0 && addEnd.text.length > 0
-                onClicked: {
-                    entries.add(addStart.text, addEnd.text, addNote.text)
-                    addStart.text = root.localNow()
-                    addEnd.text = root.localNow()
-                    addNote.text = ""
+                    Label { text: qsTr("Start") }
+                    TextField {
+                        id: addStart
+                        Layout.fillWidth: true
+                        placeholderText: "YYYY-MM-DD HH:MM"
+                    }
+                    Label { text: qsTr("End") }
+                    TextField {
+                        id: addEnd
+                        Layout.fillWidth: true
+                        placeholderText: "YYYY-MM-DD HH:MM"
+                    }
+                }
+
+                Item { Layout.fillHeight: true }
+
+                RowLayout {
+                    Layout.alignment: Qt.AlignRight
+                    Button {
+                        text: qsTr("Cancel")
+                        onClicked: entriesDialog.adding = false
+                    }
+                    Button {
+                        text: qsTr("Save")
+                        enabled: addStart.text.length > 0 && addEnd.text.length > 0
+                        onClicked: {
+                            entries.add(addStart.text, addEnd.text)
+                            entriesDialog.adding = false
+                        }
+                    }
                 }
             }
         }
