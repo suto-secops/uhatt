@@ -57,6 +57,10 @@ pub mod qobject {
         HasChildren,
         /// Whether this task's subtasks are currently shown.
         Expanded,
+        /// ISO `YYYY-MM-DD` deadline, or "" if unset.
+        Deadline,
+        /// Deadline is past and the task isn't done.
+        Overdue,
     }
 
     extern "RustQt" {
@@ -102,6 +106,12 @@ pub mod qobject {
         /// Rename the task at `row`. No-op on blank input.
         #[qinvokable]
         fn rename(self: Pin<&mut TaskListModel>, row: i32, title: &QString);
+
+        /// Set the task's deadline to an ISO `YYYY-MM-DD` date, or clear it when
+        /// `deadline` is empty. Malformed dates are ignored.
+        #[qinvokable]
+        #[cxx_name = "setDeadline"]
+        fn set_deadline(self: Pin<&mut TaskListModel>, row: i32, deadline: &QString);
 
         /// Collapse an expanded task or expand a collapsed one.
         #[qinvokable]
@@ -345,6 +355,20 @@ impl qobject::TaskListModel {
         self.reload();
     }
 
+    fn set_deadline(self: Pin<&mut Self>, row: i32, deadline: &QString) {
+        let Some(id) = self.id_at(row) else {
+            return;
+        };
+        let deadline = deadline.to_string();
+        let deadline = deadline.trim();
+        let target = (!deadline.is_empty()).then_some(deadline);
+        if let Err(e) = db::set_task_deadline(self.db_conn(), &id, target) {
+            eprintln!("uhatt: set deadline failed: {e}");
+            return;
+        }
+        self.reload();
+    }
+
     fn toggle_expanded(mut self: Pin<&mut Self>, row: i32) {
         let Some(node) = self.node_at(row) else {
             return;
@@ -383,6 +407,10 @@ impl qobject::TaskListModel {
             qobject::TaskRole::Expanded => {
                 QVariant::from(&(node.has_children && !self.collapsed.contains(&task.id)))
             }
+            qobject::TaskRole::Deadline => {
+                QVariant::from(&QString::from(task.deadline.as_deref().unwrap_or("")))
+            }
+            qobject::TaskRole::Overdue => QVariant::from(&node.overdue),
             _ => QVariant::default(),
         }
     }
@@ -401,6 +429,11 @@ impl qobject::TaskListModel {
             qobject::TaskRole::Expanded.repr,
             QByteArray::from("expanded"),
         );
+        roles.insert(
+            qobject::TaskRole::Deadline.repr,
+            QByteArray::from("deadline"),
+        );
+        roles.insert(qobject::TaskRole::Overdue.repr, QByteArray::from("overdue"));
         roles
     }
 
