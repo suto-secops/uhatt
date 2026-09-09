@@ -7,6 +7,7 @@ fn main() {
             "src/projects_model.rs",
             "src/timer_controller.rs",
             "src/entries_model.rs",
+            "src/graph_model.rs",
         ])
         .build();
 }
