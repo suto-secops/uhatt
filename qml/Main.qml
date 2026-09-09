@@ -9,49 +9,101 @@ ApplicationWindow {
     id: root
 
     width: 720
-    height: 520
+    height: 560
     visible: true
     title: qsTr("uhatt")
 
-    App { id: backend }
+    TaskListModel {
+        id: tasks
+    }
 
     ColumnLayout {
-        anchors.centerIn: parent
-        spacing: 16
-
-        Label {
-            Layout.alignment: Qt.AlignHCenter
-            text: qsTr("uhatt")
-            font.pixelSize: 32
-            font.bold: true
-        }
-
-        Label {
-            Layout.alignment: Qt.AlignHCenter
-            text: qsTr("version %1").arg(backend.version)
-            opacity: 0.7
-        }
+        anchors.fill: parent
+        anchors.margins: 12
+        spacing: 8
 
         RowLayout {
-            Layout.alignment: Qt.AlignHCenter
+            Layout.fillWidth: true
             spacing: 8
 
             TextField {
-                id: nameField
-                placeholderText: qsTr("your name")
-                text: qsTr("world")
+                id: input
+                Layout.fillWidth: true
+                placeholderText: qsTr("New task, then Enter")
+                onAccepted: {
+                    tasks.add(text)
+                    text = ""
+                }
             }
 
             Button {
-                text: qsTr("Greet")
-                onClicked: greetingLabel.text = backend.greeting(nameField.text)
+                text: qsTr("Add")
+                enabled: input.text.trim().length > 0
+                onClicked: {
+                    tasks.add(input.text)
+                    input.text = ""
+                }
             }
         }
 
-        Label {
-            id: greetingLabel
-            Layout.alignment: Qt.AlignHCenter
-            text: qsTr("(scaffold - milestone 1)")
+        ListView {
+            id: list
+
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            clip: true
+            model: tasks
+            spacing: 2
+
+            delegate: ItemDelegate {
+                id: rowItem
+
+                required property int index
+                required property string title
+                required property bool done
+                required property int depth
+
+                width: ListView.view ? ListView.view.width : 0
+                leftPadding: 8 + depth * 20
+                opacity: done ? 0.55 : 1.0
+
+                contentItem: RowLayout {
+                    spacing: 8
+
+                    CheckBox {
+                        checked: rowItem.done
+                        onToggled: tasks.setDone(rowItem.index, checked)
+                    }
+
+                    TextField {
+                        Layout.fillWidth: true
+                        text: rowItem.title
+                        padding: 4
+                        font.strikeout: rowItem.done
+                        background: Rectangle {
+                            color: "transparent"
+                        }
+                        onEditingFinished: {
+                            if (text !== rowItem.title)
+                                tasks.rename(rowItem.index, text)
+                        }
+                    }
+
+                    ToolButton {
+                        text: "✕"
+                        ToolTip.text: qsTr("Delete")
+                        ToolTip.visible: hovered
+                        onClicked: tasks.remove(rowItem.index)
+                    }
+                }
+            }
+
+            Label {
+                anchors.centerIn: parent
+                visible: list.count === 0
+                text: qsTr("No tasks yet - add one above")
+                opacity: 0.5
+            }
         }
     }
 }
