@@ -541,18 +541,24 @@ ApplicationWindow {
                     contentItem: RowLayout {
                         spacing: 4
 
-                        Button {
-                            implicitWidth: 24
-                            implicitHeight: 24
-                            flat: true
-                            padding: 0
-                            visible: rowItem.hasChildren
-                            text: rowItem.expanded ? "–" : "+"
-                            onClicked: tasks.toggleExpanded(rowItem.index)
-                        }
-                        Item {
-                            visible: !rowItem.hasChildren
-                            implicitWidth: 24
+                        // Expand/collapse control. A plain Label + TapHandler rather than
+                        // a Button: Button styles add unpredictable padding that clipped
+                        // the single-glyph label to nothing on the Basic style. ASCII
+                        // "[+]" / "[-]" because the system font has no box-drawing glyphs.
+                        Label {
+                            Layout.preferredWidth: 26
+                            horizontalAlignment: Text.AlignHCenter
+                            text: rowItem.hasChildren ? (rowItem.expanded ? "[-]" : "[+]") : ""
+                            color: disclosureHover.hovered ? palette.highlight : palette.text
+                            font.pointSize: 11
+
+                            HoverHandler {
+                                id: disclosureHover
+                            }
+                            TapHandler {
+                                enabled: rowItem.hasChildren
+                                onTapped: tasks.toggleExpanded(rowItem.index)
+                            }
                         }
 
                         CheckBox {
@@ -587,7 +593,8 @@ ApplicationWindow {
                             visible: rowItem.deadline !== ""
                             text: rowItem.deadline
                             font.pointSize: 9
-                            color: rowItem.overdue ? "#c0392b" : palette.mid
+                            color: rowItem.overdue ? "#e74c3c" : palette.text
+                            opacity: rowItem.overdue ? 1 : 0.7
                         }
 
                         Button {
@@ -601,7 +608,7 @@ ApplicationWindow {
                         Button {
                             implicitWidth: 30
                             padding: 4
-                            opacity: rowItem.hovered ? 1 : 0
+                            opacity: rowItem.hovered ? 1 : 0.35
                             text: "⋯"
                             ToolTip.text: qsTr("More actions")
                             ToolTip.visible: hovered
