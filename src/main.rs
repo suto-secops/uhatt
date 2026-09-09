@@ -2,6 +2,7 @@
 
 mod db;
 mod domain;
+mod entries_model;
 mod projects_model;
 mod tasks_model;
 mod timer_controller;
