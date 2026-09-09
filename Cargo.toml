@@ -1,0 +1,27 @@
+[package]
+name = "uhatt"
+version = "0.0.0"
+edition = "2021"
+license = "PolyForm-Noncommercial-1.0.0"
+description = "Task and time-tracking desktop app for KDE"
+repository = "https://github.com/suto-secops/uhatt"
+rust-version = "1.85"
+
+[[bin]]
+name = "uhatt"
+path = "src/main.rs"
+
+[dependencies]
+cxx = "1.0"
+cxx-qt = "0.10"
+# Only the modules we actually link, to keep the AUR `depends` list minimal
+# and auditable. Charts are used from QML (`import QtCharts`), not via a
+# cxx-qt-lib binding, so no extra feature is needed for them.
+cxx-qt-lib = { version = "0.10", default-features = false, features = ["qt_gui", "qt_qml"] }
+
+[build-dependencies]
+cxx-qt-build = { version = "0.10", features = ["link_qt_object_files"] }
+
+[profile.release]
+lto = "thin"
+strip = true
