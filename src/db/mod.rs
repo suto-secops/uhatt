@@ -140,13 +140,15 @@ pub fn get_task(conn: &Connection, id: &str) -> rusqlite::Result<Option<Task>> {
     .optional()
 }
 
-/// A task plus its nesting depth and whether it has any subtasks, in tree
-/// (pre-order) display order. Siblings are ordered by `sort_order`.
+/// A task plus view-only annotations, in tree (pre-order) display order.
+/// Siblings are ordered by `sort_order`.
 #[derive(Debug, Clone)]
 pub struct TaskNode {
     pub task: Task,
     pub depth: u32,
     pub has_children: bool,
+    /// Deadline is in the past and the task isn't done.
+    pub overdue: bool,
 }
 
 /// All tasks matching `filter` as a depth-annotated, pre-ordered list for the
@@ -176,7 +178,10 @@ pub fn list_task_tree(
          )
          SELECT {TASK_COLUMNS},
                 subtree.depth,
-                EXISTS(SELECT 1 FROM tasks c WHERE c.parent_task_id = tasks.id)
+                EXISTS(SELECT 1 FROM tasks c WHERE c.parent_task_id = tasks.id),
+                (tasks.deadline IS NOT NULL
+                    AND tasks.deadline < date('now')
+                    AND tasks.status <> 'done')
          FROM tasks JOIN subtree ON tasks.id = subtree.task_id
          ORDER BY subtree.sort_path"
     );
@@ -186,6 +191,7 @@ pub fn list_task_tree(
             task: row_to_task(r)?,
             depth: r.get::<_, i64>(10)? as u32,
             has_children: r.get::<_, i64>(11)? != 0,
+            overdue: r.get::<_, i64>(12)? != 0,
         })
     };
     let rows = match bind {
@@ -207,6 +213,42 @@ pub fn rename_task(conn: &Connection, id: &str, title: &str) -> rusqlite::Result
         "UPDATE tasks SET title = ?2 WHERE id = ?1",
         params![id, title.trim()],
     )?;
+    Ok(())
+}
+
+/// True for an ISO calendar date, `YYYY-MM-DD`.
+fn is_iso_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[8..].iter().all(u8::is_ascii_digit)
+}
+
+/// Set (`Some("YYYY-MM-DD")`) or clear (`None`) a task's deadline.
+/// A malformed date string is ignored.
+pub fn set_task_deadline(
+    conn: &Connection,
+    id: &str,
+    deadline: Option<&str>,
+) -> rusqlite::Result<()> {
+    match deadline {
+        Some(d) if is_iso_date(d.trim()) => {
+            conn.execute(
+                "UPDATE tasks SET deadline = ?2 WHERE id = ?1",
+                params![id, d.trim()],
+            )?;
+        }
+        Some(_) => {} // ignore malformed input
+        None => {
+            conn.execute(
+                "UPDATE tasks SET deadline = NULL WHERE id = ?1",
+                params![id],
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -513,6 +555,50 @@ mod tests {
             get_task(&conn, &kid.id).unwrap().unwrap().project_id,
             Some(p.id)
         );
+    }
+
+    fn node(conn: &Connection, id: &str) -> TaskNode {
+        list_task_tree(conn, &ProjectFilter::All)
+            .unwrap()
+            .into_iter()
+            .find(|n| n.task.id == id)
+            .unwrap()
+    }
+
+    #[test]
+    fn deadline_set_clear_and_overdue_flag() {
+        let conn = open_in_memory().unwrap();
+        let t = root(&conn, "task");
+        assert_eq!(node(&conn, &t.id).task.deadline, None);
+        assert!(!node(&conn, &t.id).overdue);
+
+        set_task_deadline(&conn, &t.id, Some("2000-01-01")).unwrap();
+        assert_eq!(
+            node(&conn, &t.id).task.deadline.as_deref(),
+            Some("2000-01-01")
+        );
+        assert!(node(&conn, &t.id).overdue, "a past date is overdue");
+
+        // A completed task is never overdue.
+        set_task_status(&conn, &t.id, TaskStatus::Done).unwrap();
+        assert!(!node(&conn, &t.id).overdue);
+
+        // A future date is not overdue.
+        set_task_status(&conn, &t.id, TaskStatus::Todo).unwrap();
+        set_task_deadline(&conn, &t.id, Some("2999-12-31")).unwrap();
+        assert!(!node(&conn, &t.id).overdue);
+
+        set_task_deadline(&conn, &t.id, None).unwrap();
+        assert_eq!(node(&conn, &t.id).task.deadline, None);
+    }
+
+    #[test]
+    fn malformed_deadline_is_ignored() {
+        let conn = open_in_memory().unwrap();
+        let t = root(&conn, "task");
+        set_task_deadline(&conn, &t.id, Some("31/12/2026")).unwrap();
+        set_task_deadline(&conn, &t.id, Some("not a date")).unwrap();
+        assert_eq!(node(&conn, &t.id).task.deadline, None);
     }
 
     #[test]
