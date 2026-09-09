@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::domain::{new_id, Project, ProjectFilter, Task, TaskStatus};
+use crate::domain::{new_id, EntrySource, Project, ProjectFilter, Task, TaskStatus, TimeEntry};
+
+/// SQLite expression producing the current UTC time as an ISO-8601 string.
+const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')";
 
 mod migrations;
 
@@ -347,6 +350,97 @@ pub fn delete_project(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
+// --- Time entries & timer ----------------------------------------------------
+
+const ENTRY_COLUMNS: &str = "id, task_id, start_ts, end_ts, source, note, created_at";
+
+fn row_to_entry(r: &rusqlite::Row<'_>) -> rusqlite::Result<TimeEntry> {
+    Ok(TimeEntry {
+        id: r.get(0)?,
+        task_id: r.get(1)?,
+        start_ts: r.get(2)?,
+        end_ts: r.get(3)?,
+        source: EntrySource::from_db(&r.get::<_, String>(4)?),
+        note: r.get(5)?,
+        created_at: r.get(6)?,
+    })
+}
+
+/// Fetch one time entry by id.
+pub fn get_entry(conn: &Connection, id: &str) -> rusqlite::Result<Option<TimeEntry>> {
+    conn.query_row(
+        &format!("SELECT {ENTRY_COLUMNS} FROM time_entries WHERE id = ?1"),
+        params![id],
+        row_to_entry,
+    )
+    .optional()
+}
+
+/// The currently running timer entry (`end_ts IS NULL`), if any.
+pub fn running_entry(conn: &Connection) -> rusqlite::Result<Option<TimeEntry>> {
+    conn.query_row(
+        &format!("SELECT {ENTRY_COLUMNS} FROM time_entries WHERE end_ts IS NULL"),
+        [],
+        row_to_entry,
+    )
+    .optional()
+}
+
+/// The running timer joined with its task, for the UI's timer bar.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunningTimer {
+    pub entry_id: String,
+    pub task_id: String,
+    pub task_title: String,
+    pub start_ts: String,
+}
+
+pub fn running_timer(conn: &Connection) -> rusqlite::Result<Option<RunningTimer>> {
+    conn.query_row(
+        "SELECT e.id, e.task_id, t.title, e.start_ts
+         FROM time_entries e JOIN tasks t ON t.id = e.task_id
+         WHERE e.end_ts IS NULL",
+        [],
+        |r| {
+            Ok(RunningTimer {
+                entry_id: r.get(0)?,
+                task_id: r.get(1)?,
+                task_title: r.get(2)?,
+                start_ts: r.get(3)?,
+            })
+        },
+    )
+    .optional()
+}
+
+/// Start timing `task_id`. Any already-running timer is stopped first, so this
+/// doubles as "switch the timer to this task".
+pub fn start_timer(conn: &Connection, task_id: &str) -> rusqlite::Result<TimeEntry> {
+    stop_timer(conn)?;
+    let id = new_id();
+    conn.execute(
+        &format!(
+            "INSERT INTO time_entries (id, task_id, start_ts, source, created_at)
+             VALUES (?1, ?2, {NOW}, 'timer', {NOW})"
+        ),
+        params![id, task_id],
+    )?;
+    Ok(get_entry(conn, &id)?.expect("row just inserted"))
+}
+
+/// Stop the running timer, if any, setting its `end_ts` to now.
+/// Returns the entry that was stopped.
+pub fn stop_timer(conn: &Connection) -> rusqlite::Result<Option<TimeEntry>> {
+    let Some(entry) = running_entry(conn)? else {
+        return Ok(None);
+    };
+    conn.execute(
+        &format!("UPDATE time_entries SET end_ts = {NOW} WHERE id = ?1"),
+        params![entry.id],
+    )?;
+    get_entry(conn, &entry.id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -599,6 +693,32 @@ mod tests {
         set_task_deadline(&conn, &t.id, Some("31/12/2026")).unwrap();
         set_task_deadline(&conn, &t.id, Some("not a date")).unwrap();
         assert_eq!(node(&conn, &t.id).task.deadline, None);
+    }
+
+    #[test]
+    fn timer_start_stop_and_switch() {
+        let conn = open_in_memory().unwrap();
+        let a = root(&conn, "a");
+        let b = root(&conn, "b");
+
+        assert!(running_timer(&conn).unwrap().is_none());
+
+        let e1 = start_timer(&conn, &a.id).unwrap();
+        assert!(e1.end_ts.is_none());
+        assert_eq!(running_timer(&conn).unwrap().unwrap().task_id, a.id);
+
+        // Starting on another task closes the first entry.
+        start_timer(&conn, &b.id).unwrap();
+        assert!(get_entry(&conn, &e1.id).unwrap().unwrap().end_ts.is_some());
+        assert_eq!(running_timer(&conn).unwrap().unwrap().task_id, b.id);
+
+        let stopped = stop_timer(&conn).unwrap().unwrap();
+        assert_eq!(stopped.task_id, b.id);
+        assert!(stopped.end_ts.is_some());
+        assert!(running_timer(&conn).unwrap().is_none());
+
+        // Stopping again is a harmless no-op.
+        assert!(stop_timer(&conn).unwrap().is_none());
     }
 
     #[test]
