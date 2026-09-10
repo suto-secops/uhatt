@@ -6,7 +6,7 @@
 
 use rusqlite::Connection;
 
-pub const MIGRATIONS: &[&str] = &[V1];
+pub const MIGRATIONS: &[&str] = &[V1, V2];
 
 /// Number of migration steps the code expects the database to be at.
 pub const COUNT: usize = MIGRATIONS.len();
@@ -81,4 +81,14 @@ BEGIN
     SELECT RAISE(ABORT, 'a timer is already running')
     WHERE EXISTS (SELECT 1 FROM time_entries WHERE end_ts IS NULL AND id <> NEW.id);
 END;
+"#;
+
+// A tiny key/value store for app-level state that isn't domain data. Currently
+// holds only `timer_heartbeat`: the last local time the running timer was seen
+// alive, used on startup to close an entry a crash left open.
+const V2: &str = r#"
+CREATE TABLE meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 "#;

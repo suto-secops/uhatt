@@ -13,8 +13,14 @@
 //! elapsed time QML shows.
 //!
 //! A session lives only in memory: if the app closes while paused, the session
-//! is forgotten on restart (the logged segments are safe). A row left open by a
-//! crash still shows as running on startup, as before.
+//! is forgotten on restart (the logged segments are safe).
+//!
+//! **Crash recovery.** While a timer runs, QML pings `heartbeat()` every 30 s,
+//! stamping `meta.timer_heartbeat`. On startup `db::recover_orphan_timer` closes
+//! any entry a crash left open - billed only up to that heartbeat - and the
+//! controller comes up as a *paused* session on that task (`recovered` is set so
+//! the UI can say so). Closing the app while running therefore looks, next
+//! launch, exactly like having hit Pause.
 
 use core::pin::Pin;
 
@@ -43,6 +49,9 @@ pub mod qobject {
         #[qproperty(bool, paused)]
         // Worked seconds accumulated from earlier segments of this session.
         #[qproperty(i32, base_seconds, cxx_name = "baseSeconds")]
+        // True when this paused session was rebuilt from a crash on startup
+        // (rather than an explicit Pause). Cleared once the user acts on it.
+        #[qproperty(bool, recovered)]
         type TimerController = super::TimerControllerRust;
     }
 
@@ -64,6 +73,10 @@ pub mod qobject {
         /// End the session, closing any open entry.
         #[qinvokable]
         fn stop(self: Pin<&mut TimerController>);
+
+        /// Record that the running timer is still alive (periodic ping from QML).
+        #[qinvokable]
+        fn heartbeat(self: Pin<&mut TimerController>);
     }
 }
 
@@ -76,6 +89,7 @@ pub struct TimerControllerRust {
     running_since: QString,
     paused: bool,
     base_seconds: i32,
+    recovered: bool,
     /// Worked seconds from completed segments of the current session.
     accumulated: i64,
 }
@@ -90,7 +104,24 @@ impl cxx_qt::Initialize for qobject::TimerController {
             }
         };
         self.as_mut().rust_mut().conn = Some(conn);
-        self.as_mut().refresh();
+
+        // Did a previous run leave a timer going? Close it off and come back up
+        // as a paused session on that task, as if Pause had been pressed.
+        match db::recover_orphan_timer(self.db_conn()).unwrap_or(None) {
+            Some(rec) => {
+                self.as_mut().rust_mut().accumulated = rec.seconds;
+                self.as_mut()
+                    .set_base_seconds(rec.seconds.try_into().unwrap_or(i32::MAX));
+                self.as_mut()
+                    .set_running_task_id(QString::from(rec.task_id.as_str()));
+                self.as_mut()
+                    .set_running_task_title(QString::from(rec.task_title.as_str()));
+                self.as_mut().set_running_since(QString::default());
+                self.as_mut().set_paused(true);
+                self.as_mut().set_recovered(true);
+            }
+            None => self.as_mut().refresh(),
+        }
     }
 }
 
@@ -132,10 +163,12 @@ impl qobject::TimerController {
         // A new session: drop any accumulated time from the previous one.
         self.as_mut().rust_mut().accumulated = 0;
         self.as_mut().set_base_seconds(0);
+        self.as_mut().set_recovered(false);
         if let Err(e) = db::start_timer(self.db_conn(), &task_id) {
             eprintln!("uhatt: start timer failed: {e}");
             return;
         }
+        let _ = db::timer_heartbeat(self.db_conn());
         self.as_mut().refresh();
     }
 
@@ -173,6 +206,8 @@ impl qobject::TimerController {
             eprintln!("uhatt: resume timer failed: {e}");
             return;
         }
+        let _ = db::timer_heartbeat(self.db_conn());
+        self.as_mut().set_recovered(false);
         self.as_mut().refresh();
     }
 
@@ -183,6 +218,13 @@ impl qobject::TimerController {
         }
         self.as_mut().rust_mut().accumulated = 0;
         self.as_mut().set_base_seconds(0);
+        self.as_mut().set_recovered(false);
         self.as_mut().refresh();
+    }
+
+    fn heartbeat(self: Pin<&mut Self>) {
+        if let Err(e) = db::timer_heartbeat(self.db_conn()) {
+            eprintln!("uhatt: timer heartbeat failed: {e}");
+        }
     }
 }

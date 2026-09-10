@@ -501,6 +501,74 @@ pub fn entry_duration_seconds(conn: &Connection, id: &str) -> rusqlite::Result<i
     .map(|o| o.unwrap_or(0))
 }
 
+// --- Crash recovery --------------------------------------------------------
+
+/// `meta` key holding the last local time the running timer was seen alive.
+const HEARTBEAT_KEY: &str = "timer_heartbeat";
+
+/// Read a value from the `meta` key/value table.
+pub fn get_meta(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
+        r.get(0)
+    })
+    .optional()
+}
+
+/// Upsert a value into the `meta` key/value table.
+pub fn set_meta(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
+/// Stamp the running timer as alive as of now. Called on start/resume and on a
+/// periodic tick from QML so `recover_orphan_timer` has a recent cut-off.
+pub fn timer_heartbeat(conn: &Connection) -> rusqlite::Result<()> {
+    let now: String = conn.query_row(&format!("SELECT {NOW}"), [], |r| r.get(0))?;
+    set_meta(conn, HEARTBEAT_KEY, &now)
+}
+
+/// What a crash left running, after it has been closed off.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecoveredTimer {
+    pub task_id: String,
+    pub task_title: String,
+    /// Worked seconds now banked on the (now closed) entry.
+    pub seconds: i64,
+}
+
+/// Close an entry a previous run left open (`end_ts IS NULL`), billing it only
+/// up to the last heartbeat and never outside the entry's own `[start, now]`
+/// span. Returns what was recovered so the caller can present it as a paused
+/// session; `None` when nothing was left running.
+///
+/// The cut-off is `max(start_ts, min(heartbeat, now))`: a missing or stale
+/// heartbeat collapses to `start_ts` (≈ zero duration - we don't guess), a
+/// future one is clamped to now, otherwise the heartbeat wins.
+pub fn recover_orphan_timer(conn: &Connection) -> rusqlite::Result<Option<RecoveredTimer>> {
+    let Some(rt) = running_timer(conn)? else {
+        return Ok(None);
+    };
+    let heartbeat = get_meta(conn, HEARTBEAT_KEY)?;
+    conn.execute(
+        &format!(
+            "UPDATE time_entries
+                SET end_ts = MAX(start_ts, MIN(COALESCE(?2, start_ts), {NOW}))
+              WHERE id = ?1"
+        ),
+        params![rt.entry_id, heartbeat],
+    )?;
+    let seconds = entry_duration_seconds(conn, &rt.entry_id)?;
+    Ok(Some(RecoveredTimer {
+        task_id: rt.task_id,
+        task_title: rt.task_title,
+        seconds,
+    }))
+}
+
 /// True for `YYYY-MM-DDTHH:MM` or `YYYY-MM-DDTHH:MM:SS` (a space instead of `T`
 /// is also accepted). Cheap structural check, not a full calendar validation.
 fn is_iso_datetime(s: &str) -> bool {
@@ -1044,6 +1112,74 @@ mod tests {
         let open = running_entry(&conn).unwrap().unwrap();
         assert_eq!(entry_duration_seconds(&conn, &open.id).unwrap(), 0);
         assert_eq!(entry_duration_seconds(&conn, "nope").unwrap(), 0);
+    }
+
+    #[test]
+    fn meta_get_set_roundtrips_and_upserts() {
+        let conn = open_in_memory().unwrap();
+        assert_eq!(get_meta(&conn, "k").unwrap(), None);
+        set_meta(&conn, "k", "one").unwrap();
+        assert_eq!(get_meta(&conn, "k").unwrap().as_deref(), Some("one"));
+        set_meta(&conn, "k", "two").unwrap();
+        assert_eq!(get_meta(&conn, "k").unwrap().as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn recover_orphan_timer_closes_at_heartbeat() {
+        let conn = open_in_memory().unwrap();
+        let t = root(&conn, "t");
+        // A run a crash left open, started well in the past.
+        conn.execute(
+            "INSERT INTO time_entries (id, task_id, start_ts, created_at)
+             VALUES ('c1', ?1, '2026-03-01T09:00:00', '2026-03-01T09:00:00')",
+            params![t.id],
+        )
+        .unwrap();
+        set_meta(&conn, "timer_heartbeat", "2026-03-01T09:20:00").unwrap();
+
+        let rec = recover_orphan_timer(&conn).unwrap().unwrap();
+        assert_eq!(rec.task_id, t.id);
+        assert_eq!(rec.task_title, "t");
+        assert_eq!(rec.seconds, 20 * 60);
+
+        // Entry closed exactly at the heartbeat; nothing still running.
+        assert!(running_timer(&conn).unwrap().is_none());
+        assert_eq!(
+            get_entry(&conn, "c1").unwrap().unwrap().end_ts.as_deref(),
+            Some("2026-03-01T09:20:00")
+        );
+        // Idempotent: a second call finds nothing open.
+        assert!(recover_orphan_timer(&conn).unwrap().is_none());
+    }
+
+    #[test]
+    fn recover_orphan_timer_clamps_missing_or_stale_heartbeat_to_start() {
+        let conn = open_in_memory().unwrap();
+        let t = root(&conn, "t");
+        conn.execute(
+            "INSERT INTO time_entries (id, task_id, start_ts, created_at)
+             VALUES ('c1', ?1, '2026-03-01T09:00:00', '2026-03-01T09:00:00')",
+            params![t.id],
+        )
+        .unwrap();
+        // Heartbeat older than the entry's start: don't bill negative time.
+        set_meta(&conn, "timer_heartbeat", "2026-02-14T08:00:00").unwrap();
+
+        let rec = recover_orphan_timer(&conn).unwrap().unwrap();
+        assert_eq!(rec.seconds, 0);
+        assert_eq!(
+            get_entry(&conn, "c1").unwrap().unwrap().end_ts.as_deref(),
+            Some("2026-03-01T09:00:00")
+        );
+    }
+
+    #[test]
+    fn recover_orphan_timer_noop_without_an_open_entry() {
+        let conn = open_in_memory().unwrap();
+        let t = root(&conn, "t");
+        start_timer(&conn, &t.id).unwrap();
+        stop_timer(&conn).unwrap();
+        assert!(recover_orphan_timer(&conn).unwrap().is_none());
     }
 
     #[test]
