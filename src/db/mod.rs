@@ -347,6 +347,113 @@ pub fn set_task_deadline(
     Ok(())
 }
 
+// --- Deadline countdown --------------------------------------------------
+
+/// How "time until a deadline" is worded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CountdownMode {
+    /// Don't show it.
+    Off,
+    /// Largest sensible pair: "1 month and 3 days", "2 weeks and 1 day".
+    Optimal,
+    /// A whole count of one unit.
+    Days,
+    Weeks,
+    Months,
+    Hours,
+}
+
+fn plural(n: i64, unit: &str) -> String {
+    if n == 1 {
+        format!("1 {unit}")
+    } else {
+        format!("{n} {unit}s")
+    }
+}
+
+/// `"<head> and <n> <unit>s"`, or just `head` when `n <= 0`.
+fn and_then(head: String, n: i64, unit: &str) -> String {
+    if n <= 0 {
+        head
+    } else {
+        format!("{head} and {}", plural(n, unit))
+    }
+}
+
+/// Whole calendar months from local today up to (not past) `deadline`.
+fn whole_months(conn: &Connection, deadline: &str) -> rusqlite::Result<i64> {
+    conn.query_row(
+        &format!(
+            "WITH RECURSIVE m(n) AS (
+                 SELECT 0
+               UNION ALL
+                 SELECT n + 1 FROM m
+                 WHERE date({TODAY}, '+' || (n + 1) || ' months') <= date(?1)
+             )
+             SELECT MAX(n) FROM m"
+        ),
+        params![deadline],
+        |r| r.get(0),
+    )
+}
+
+/// A human "time left until `deadline`" per `mode`. `""` when the mode is `Off`
+/// or the date is unparseable; past deadlines read `"overdue …"`.
+pub fn deadline_countdown(
+    conn: &Connection,
+    deadline: &str,
+    mode: CountdownMode,
+) -> rusqlite::Result<String> {
+    let deadline = deadline.trim();
+    if matches!(mode, CountdownMode::Off) || !is_iso_date(deadline) {
+        return Ok(String::new());
+    }
+    let days: i64 = conn.query_row(
+        &format!("SELECT CAST(julianday(date(?1)) - julianday({TODAY}) AS INTEGER)"),
+        params![deadline],
+        |r| r.get(0),
+    )?;
+    if days < 0 {
+        return Ok(match mode {
+            CountdownMode::Hours => format!("overdue by {}", plural(-days * 24, "hour")),
+            _ => format!("overdue by {}", plural(-days, "day")),
+        });
+    }
+    Ok(match mode {
+        CountdownMode::Off => String::new(),
+        CountdownMode::Hours => plural(days * 24, "hour"),
+        CountdownMode::Days => match days {
+            0 => "today".to_owned(),
+            1 => "tomorrow".to_owned(),
+            _ => plural(days, "day"),
+        },
+        CountdownMode::Weeks => plural(days / 7, "week"),
+        CountdownMode::Months => plural(whole_months(conn, deadline)?, "month"),
+        CountdownMode::Optimal => match days {
+            0 => "today".to_owned(),
+            1 => "tomorrow".to_owned(),
+            _ => {
+                let months = whole_months(conn, deadline)?;
+                if months >= 1 {
+                    let rem: i64 = conn.query_row(
+                        &format!(
+                            "SELECT CAST(julianday(date(?1))
+                                       - julianday(date({TODAY}, '+' || ?2 || ' months')) AS INTEGER)"
+                        ),
+                        params![deadline, months],
+                        |r| r.get(0),
+                    )?;
+                    and_then(plural(months, "month"), rem, "day")
+                } else if days >= 7 {
+                    and_then(plural(days / 7, "week"), days % 7, "day")
+                } else {
+                    plural(days, "day")
+                }
+            }
+        },
+    })
+}
+
 /// Set a task's status, stamping or clearing `completed_at` to match.
 pub fn set_task_status(conn: &Connection, id: &str, status: TaskStatus) -> rusqlite::Result<()> {
     let done = matches!(status, TaskStatus::Done);
@@ -1058,6 +1165,35 @@ mod tests {
 
         delete_task(&conn, &parent.id).unwrap();
         assert!(titles(&conn).is_empty());
+    }
+
+    #[test]
+    fn deadline_countdown_words_and_modes() {
+        use CountdownMode::*;
+        let conn = open_in_memory().unwrap();
+        // A date `mods` (SQLite modifiers) away from local today.
+        let at = |mods: &str| -> String {
+            conn.query_row(&format!("SELECT date('now','localtime',{mods})"), [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        let cd = |date: &str, m| deadline_countdown(&conn, date, m).unwrap();
+
+        assert_eq!(cd(&at("'+3 days'"), Off), "");
+        assert_eq!(cd("not-a-date", Optimal), "");
+
+        assert_eq!(cd(&at("'+0 days'"), Days), "today");
+        assert_eq!(cd(&at("'+1 day'"), Days), "tomorrow");
+        assert_eq!(cd(&at("'+5 days'"), Days), "5 days");
+        assert_eq!(cd(&at("'+21 days'"), Weeks), "3 weeks");
+        assert_eq!(cd(&at("'+2 days'"), Hours), "48 hours");
+        assert_eq!(cd(&at("'-2 days'"), Days), "overdue by 2 days");
+
+        assert_eq!(cd(&at("'+3 days'"), Optimal), "3 days");
+        assert_eq!(cd(&at("'+8 days'"), Optimal), "1 week and 1 day");
+        assert_eq!(cd(&at("'+14 days'"), Optimal), "2 weeks");
+        assert!(cd(&at("'+1 month','+3 days'"), Optimal).starts_with("1 month"));
     }
 
     #[test]

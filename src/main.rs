@@ -5,6 +5,7 @@ mod domain;
 mod entries_model;
 mod graph_model;
 mod projects_model;
+mod settings;
 mod tasks_model;
 mod timer_controller;
 

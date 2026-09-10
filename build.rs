@@ -8,6 +8,7 @@ fn main() {
             "src/timer_controller.rs",
             "src/entries_model.rs",
             "src/graph_model.rs",
+            "src/settings.rs",
         ])
         .build();
 }

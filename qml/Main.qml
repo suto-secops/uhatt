@@ -59,6 +59,9 @@ ApplicationWindow {
     GraphModel {
         id: graph
     }
+    Settings {
+        id: settings
+    }
 
     Dialog {
         id: graphDialog
@@ -545,8 +548,8 @@ ApplicationWindow {
         title: qsTr("Settings")
         modal: true
         anchors.centerIn: Overlay.overlay
-        width: 460
-        height: 340
+        width: 480
+        height: 400
         standardButtons: Dialog.Close
 
         contentItem: ColumnLayout {
@@ -576,6 +579,65 @@ ApplicationWindow {
                 Switch {
                     checked: tasks.showDone
                     onToggled: tasks.showDone = checked
+                }
+            }
+
+            // ---- Deadlines group ----
+            Label {
+                text: qsTr("Deadlines")
+                font.bold: true
+                Layout.topMargin: 4
+            }
+            ColumnLayout {
+                Layout.fillWidth: true
+                Layout.leftMargin: 8
+                spacing: 2
+
+                Label {
+                    text: qsTr("Show time left next to a deadline")
+                    Layout.fillWidth: true
+                }
+                Label {
+                    text: qsTr("How the remaining time is worded.")
+                    font.pointSize: 8
+                    opacity: 0.6
+                }
+                RowLayout {
+                    Layout.topMargin: 4
+                    spacing: 6
+                    Repeater {
+                        model: [
+                            { v: 0, label: qsTr("Off") },
+                            { v: 1, label: qsTr("Auto") },
+                            { v: 5, label: qsTr("Hours") },
+                            { v: 2, label: qsTr("Days") },
+                            { v: 3, label: qsTr("Weeks") },
+                            { v: 4, label: qsTr("Months") },
+                        ]
+                        delegate: Button {
+                            required property var modelData
+                            text: modelData.label
+                            checkable: true
+                            checked: settings.deadlineCountdown === modelData.v
+                            onClicked: settings.deadlineCountdown = modelData.v
+                        }
+                    }
+                }
+                Label {
+                    Layout.topMargin: 2
+                    font.pointSize: 8
+                    opacity: 0.6
+                    // Live preview against a date ~5 weeks out. The mode is
+                    // named in the binding so it re-runs on change.
+                    text: {
+                        settings.deadlineCountdown
+                        let d = new Date()
+                        d.setDate(d.getDate() + 38)
+                        let iso = Qt.formatDate(d, "yyyy-MM-dd")
+                        let s = settings.countdownText(iso)
+                        return s === "" ? qsTr("(hidden)")
+                                        : qsTr("e.g. “%1  ·  %2”").arg(iso).arg(s)
+                    }
                 }
             }
 
@@ -1127,7 +1189,14 @@ ApplicationWindow {
 
                         Label {
                             visible: rowItem.deadline !== ""
-                            text: rowItem.deadline
+                            // `settings.deadlineCountdown` is referenced so the
+                            // binding re-runs when the preference changes.
+                            readonly property string countdown:
+                                (settings.deadlineCountdown, rowItem.deadline !== "")
+                                    ? settings.countdownText(rowItem.deadline) : ""
+                            text: countdown !== ""
+                                  ? rowItem.deadline + "  ·  " + countdown
+                                  : rowItem.deadline
                             font.pointSize: 9
                             color: rowItem.overdue ? "#e74c3c" : palette.text
                             opacity: rowItem.overdue ? 1 : 0.7
@@ -1267,8 +1336,14 @@ ApplicationWindow {
                                     opacity: 0.7
                                 }
                                 Label {
-                                    text: rowItem.deadline !== "" ? rowItem.deadline
-                                                                  : qsTr("none")
+                                    readonly property string countdown:
+                                        (settings.deadlineCountdown, rowItem.deadline !== "")
+                                            ? settings.countdownText(rowItem.deadline) : ""
+                                    text: rowItem.deadline === ""
+                                          ? qsTr("none")
+                                          : (countdown !== ""
+                                             ? rowItem.deadline + "  ·  " + countdown
+                                             : rowItem.deadline)
                                     font.pointSize: 9
                                     color: rowItem.overdue ? "#e74c3c" : palette.text
                                 }
