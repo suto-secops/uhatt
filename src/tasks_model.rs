@@ -250,6 +250,10 @@ pub struct TaskListModelRust {
 
 /// The special `projectFilter` value that selects the completed-tasks list.
 const FINISHED: &str = "finished";
+/// The special `projectFilter` value for the deadline-bearing subset of the
+/// tree (a task and its ancestor chain, kept when it or a descendant has a
+/// deadline).
+const DEADLINED: &str = "deadlined";
 
 /// Seconds as `"0m"` / `"45m"` / `"6h 20m"`, for the view total line.
 fn human_hm(secs: i64) -> String {
@@ -264,7 +268,8 @@ fn human_hm(secs: i64) -> String {
     }
 }
 
-/// Interpret a non-`finished` `projectFilter` string as a project scope.
+/// Interpret a `projectFilter` string as a project scope. The special values
+/// (`finished`, `deadlined`) are handled by the caller before this point.
 fn parse_filter(s: &str) -> ProjectFilter {
     match s {
         "" => ProjectFilter::All,
@@ -339,12 +344,15 @@ impl qobject::TaskListModel {
         let filter_str = self.project_filter.to_string();
         let tree = if filter_str == FINISHED {
             db::list_finished_tasks(self.db_conn())
+        } else if filter_str == DEADLINED {
+            db::list_deadlined_tree(self.db_conn())
         } else {
             db::list_task_tree(self.db_conn(), &parse_filter(&filter_str), self.show_done)
         }
         .unwrap_or_default();
-        // Time total for the current scope (blank on the finished list).
-        let view_total = if filter_str == FINISHED {
+        // Time total for the current scope; blank on the ad-hoc views
+        // (finished / deadlined) where a scope total isn't meaningful.
+        let view_total = if filter_str == FINISHED || filter_str == DEADLINED {
             String::new()
         } else {
             let secs = db::scope_seconds(self.db_conn(), &parse_filter(&filter_str)).unwrap_or(0);
@@ -500,7 +508,7 @@ impl qobject::TaskListModel {
         let title = title.to_string();
         let title = title.trim();
         let filter_str = self.project_filter.to_string();
-        if title.is_empty() || filter_str == FINISHED {
+        if title.is_empty() || filter_str == FINISHED || filter_str == DEADLINED {
             return;
         }
         // New root tasks land in the currently filtered project, if any.
