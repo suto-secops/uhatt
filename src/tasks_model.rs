@@ -61,6 +61,8 @@ pub mod qobject {
         Deadline,
         /// Deadline is past and the task isn't done.
         Overdue,
+        /// Free-text notes / description.
+        Notes,
     }
 
     extern "RustQt" {
@@ -117,6 +119,17 @@ pub mod qobject {
         /// Rename the task at `row`. No-op on blank input.
         #[qinvokable]
         fn rename(self: Pin<&mut TaskListModel>, row: i32, title: &QString);
+
+        /// Replace the notes / description of the task at `row`.
+        #[qinvokable]
+        #[cxx_name = "setNotes"]
+        fn set_notes(self: Pin<&mut TaskListModel>, row: i32, notes: &QString);
+
+        /// A display string for the task at `row`'s time invested - its own,
+        /// plus "(incl. subtasks: …)" when it has any.
+        #[qinvokable]
+        #[cxx_name = "timeInvestedText"]
+        fn time_invested_text(self: &TaskListModel, row: i32) -> QString;
 
         /// Set the task's deadline to an ISO `YYYY-MM-DD` date, or clear it when
         /// `deadline` is empty. Malformed dates are ignored.
@@ -420,6 +433,32 @@ impl qobject::TaskListModel {
         self.reload();
     }
 
+    fn set_notes(self: Pin<&mut Self>, row: i32, notes: &QString) {
+        let Some(id) = self.id_at(row) else {
+            return;
+        };
+        if let Err(e) = db::set_task_notes(self.db_conn(), &id, &notes.to_string()) {
+            eprintln!("uhatt: set task notes failed: {e}");
+            return;
+        }
+        self.reload();
+    }
+
+    fn time_invested_text(&self, row: i32) -> QString {
+        let Some(id) = self.id_at(row) else {
+            return QString::default();
+        };
+        let conn = self.db_conn();
+        let own = db::task_seconds(conn, &id, false).unwrap_or(0);
+        let text = if db::has_subtasks(conn, &id).unwrap_or(false) {
+            let sub = db::task_seconds(conn, &id, true).unwrap_or(own);
+            format!("{}  (incl. subtasks: {})", human_hm(own), human_hm(sub))
+        } else {
+            human_hm(own)
+        };
+        QString::from(text.as_str())
+    }
+
     fn set_deadline(self: Pin<&mut Self>, row: i32, deadline: &QString) {
         let Some(id) = self.id_at(row) else {
             return;
@@ -476,6 +515,7 @@ impl qobject::TaskListModel {
                 QVariant::from(&QString::from(task.deadline.as_deref().unwrap_or("")))
             }
             qobject::TaskRole::Overdue => QVariant::from(&node.overdue),
+            qobject::TaskRole::Notes => QVariant::from(&QString::from(task.notes.as_str())),
             _ => QVariant::default(),
         }
     }
@@ -499,6 +539,7 @@ impl qobject::TaskListModel {
             QByteArray::from("deadline"),
         );
         roles.insert(qobject::TaskRole::Overdue.repr, QByteArray::from("overdue"));
+        roles.insert(qobject::TaskRole::Notes.repr, QByteArray::from("notes"));
         roles
     }
 
