@@ -9,6 +9,7 @@ fn main() {
             "src/entries_model.rs",
             "src/graph_model.rs",
             "src/settings.rs",
+            "src/calendar.rs",
         ])
         .build();
 }

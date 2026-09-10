@@ -1,5 +1,6 @@
 //! uhatt - task and time-tracking desktop app.
 
+mod calendar;
 mod db;
 mod domain;
 mod entries_model;

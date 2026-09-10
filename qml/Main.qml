@@ -62,6 +62,15 @@ ApplicationWindow {
     Settings {
         id: settings
     }
+    Calendar {
+        id: calendar
+    }
+
+    // Which page fills the centre pane: "tasks" (the list) or "calendar".
+    property string mainView: "tasks"
+    // The calendar loads its data once at startup; re-read it each time the
+    // page is opened so deadline edits made on the task list show up.
+    onMainViewChanged: if (mainView === "calendar") calendar.reload()
 
     // Floating chip shown under the cursor while a task is being dragged onto
     // another to re-parent it. Lives at the window level so it isn't clipped by
@@ -805,8 +814,12 @@ ApplicationWindow {
                     required property var modelData
                     Layout.fillWidth: true
                     text: modelData.label
-                    highlighted: tasks.projectFilter === modelData.key
-                    onClicked: tasks.projectFilter = modelData.key
+                    highlighted: root.mainView === "tasks"
+                                 && tasks.projectFilter === modelData.key
+                    onClicked: {
+                        tasks.projectFilter = modelData.key
+                        root.mainView = "tasks"
+                    }
                 }
             }
 
@@ -836,9 +849,12 @@ ApplicationWindow {
                     property bool editing: false
 
                     width: projectList.width
-                    highlighted: tasks.projectFilter === pdel.id
-                    onClicked: if (!pdel.editing)
+                    highlighted: root.mainView === "tasks"
+                                 && tasks.projectFilter === pdel.id
+                    onClicked: if (!pdel.editing) {
                         tasks.projectFilter = pdel.id
+                        root.mainView = "tasks"
+                    }
 
                     contentItem: RowLayout {
                         Label {
@@ -916,6 +932,22 @@ ApplicationWindow {
                     }
                 }
             }
+
+            // ---- Others -------------------------------------------------
+            MenuSeparator {
+                Layout.fillWidth: true
+            }
+            Label {
+                text: qsTr("Others")
+                font.bold: true
+                Layout.topMargin: 2
+            }
+            ItemDelegate {
+                Layout.fillWidth: true
+                text: qsTr("Calendar")
+                highlighted: root.mainView === "calendar"
+                onClicked: root.mainView = "calendar"
+            }
         }
 
         ToolSeparator {
@@ -925,6 +957,7 @@ ApplicationWindow {
         // ---- Tasks -----------------------------------------------------
         ColumnLayout {
             id: taskPane
+            visible: root.mainView === "tasks"
             Layout.fillWidth: true
             Layout.fillHeight: true
             spacing: 8
@@ -1701,6 +1734,326 @@ ApplicationWindow {
                     visible: list.count === 0
                     text: qsTr("No tasks here yet")
                     opacity: 0.5
+                }
+            }
+        }
+
+        // ---- Calendar page -------------------------------------------
+        ColumnLayout {
+            id: calendarPane
+            visible: root.mainView === "calendar"
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            spacing: 8
+
+            // "grid" (month calendar + day list) or "agenda" (a flat,
+            // date-grouped list of every upcoming deadline).
+            property string mode: "grid"
+            // Month on show, as year + 0-based month.
+            property int viewYear: new Date().getFullYear()
+            property int viewMonth: new Date().getMonth()
+            // Selected day, ISO "yyyy-MM-dd".
+            property string selectedIso: Qt.formatDate(new Date(), "yyyy-MM-dd")
+
+            // Deadline items, re-parsed whenever the model bumps `revision`.
+            readonly property var items:
+                (calendar.revision, JSON.parse(calendar.itemsJson()))
+            // { "yyyy-MM-dd": [item, ...] }.
+            readonly property var byDay: {
+                let m = ({})
+                for (let it of calendarPane.items)
+                    (m[it.date] = m[it.date] || []).push(it)
+                return m
+            }
+            // [{ date, label, items }] in date order, for the agenda.
+            readonly property var agenda: {
+                let out = []
+                let seen = ({})
+                for (let it of calendarPane.items) {
+                    if (!seen[it.date]) {
+                        seen[it.date] = { date: it.date,
+                                          label: calendarPane.longDate(it.date),
+                                          items: [] }
+                        out.push(seen[it.date])
+                    }
+                    seen[it.date].items.push(it)
+                }
+                return out
+            }
+
+            function isoOf(y, m, d) {
+                return Qt.formatDate(new Date(y, m, d), "yyyy-MM-dd")
+            }
+            function longDate(iso) {
+                let p = iso.split("-")
+                let dt = new Date(parseInt(p[0]), parseInt(p[1]) - 1, parseInt(p[2]))
+                return Qt.formatDate(dt, "ddd d MMM yyyy")
+            }
+            function stepMonth(delta) {
+                let m = calendarPane.viewMonth + delta
+                calendarPane.viewYear += Math.floor(m / 12)
+                calendarPane.viewMonth = ((m % 12) + 12) % 12
+            }
+            function goToday() {
+                let now = new Date()
+                calendarPane.viewYear = now.getFullYear()
+                calendarPane.viewMonth = now.getMonth()
+                calendarPane.selectedIso = Qt.formatDate(now, "yyyy-MM-dd")
+            }
+            // Monday on or before the 1st of the shown month.
+            function gridStart() {
+                let first = new Date(calendarPane.viewYear, calendarPane.viewMonth, 1)
+                let isoDow = (first.getDay() + 6) % 7
+                return new Date(calendarPane.viewYear, calendarPane.viewMonth,
+                                1 - isoDow)
+            }
+
+            // ---- Header: mode switch + month stepper -----------------
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 6
+
+                Repeater {
+                    model: [
+                        { key: "grid", label: qsTr("Calendar") },
+                        { key: "agenda", label: qsTr("Agenda") },
+                    ]
+                    delegate: Button {
+                        required property var modelData
+                        text: modelData.label
+                        checkable: true
+                        checked: calendarPane.mode === modelData.key
+                        onClicked: calendarPane.mode = modelData.key
+                    }
+                }
+
+                Item { Layout.fillWidth: true }
+
+                ToolButton {
+                    visible: calendarPane.mode === "grid"
+                    text: "‹"
+                    onClicked: calendarPane.stepMonth(-1)
+                }
+                Label {
+                    visible: calendarPane.mode === "grid"
+                    Layout.minimumWidth: 140
+                    horizontalAlignment: Text.AlignHCenter
+                    font.bold: true
+                    text: Qt.locale().standaloneMonthName(calendarPane.viewMonth)
+                          + " " + calendarPane.viewYear
+                }
+                ToolButton {
+                    visible: calendarPane.mode === "grid"
+                    text: "›"
+                    onClicked: calendarPane.stepMonth(1)
+                }
+                Button {
+                    visible: calendarPane.mode === "grid"
+                    text: qsTr("Today")
+                    onClicked: calendarPane.goToday()
+                }
+            }
+
+            // ---- Grid mode: month calendar + selected-day list -------
+            RowLayout {
+                visible: calendarPane.mode === "grid"
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                spacing: 12
+
+                // Month grid, held to the top so the cells stay compact.
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    spacing: 0
+
+                GridLayout {
+                    columns: 7
+                    rowSpacing: 4
+                    columnSpacing: 4
+                    Layout.fillWidth: true
+
+                    Repeater {
+                        model: [qsTr("Mon"), qsTr("Tue"), qsTr("Wed"),
+                                qsTr("Thu"), qsTr("Fri"), qsTr("Sat"), qsTr("Sun")]
+                        delegate: Label {
+                            required property string modelData
+                            Layout.fillWidth: true
+                            horizontalAlignment: Text.AlignHCenter
+                            text: modelData
+                            font.pointSize: 8
+                            opacity: 0.6
+                        }
+                    }
+
+                    Repeater {
+                        model: 42
+                        delegate: ItemDelegate {
+                            id: cell
+                            required property int index
+
+                            readonly property date cellDate: {
+                                let s = calendarPane.gridStart()
+                                return new Date(s.getFullYear(), s.getMonth(),
+                                                s.getDate() + cell.index)
+                            }
+                            readonly property string iso:
+                                Qt.formatDate(cell.cellDate, "yyyy-MM-dd")
+                            readonly property bool inMonth:
+                                cell.cellDate.getMonth() === calendarPane.viewMonth
+                            readonly property bool isToday:
+                                cell.iso === Qt.formatDate(new Date(), "yyyy-MM-dd")
+                            readonly property var dayItems:
+                                calendarPane.byDay[cell.iso] || []
+
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 92
+                            padding: 4
+                            highlighted: cell.iso === calendarPane.selectedIso
+                            onClicked: calendarPane.selectedIso = cell.iso
+
+                            contentItem: ColumnLayout {
+                                spacing: 2
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Label {
+                                        text: cell.cellDate.getDate()
+                                        font.pointSize: 9
+                                        font.bold: cell.isToday
+                                        opacity: cell.inMonth ? 1 : 0.35
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                    Label {
+                                        visible: cell.dayItems.length > 0
+                                        text: cell.dayItems.length
+                                        font.pointSize: 8
+                                        opacity: 0.6
+                                    }
+                                }
+                                // Up to three deadline chips, then "+N".
+                                Repeater {
+                                    model: Math.min(3, cell.dayItems.length)
+                                    delegate: Label {
+                                        required property int index
+                                        Layout.fillWidth: true
+                                        text: cell.dayItems[index].title
+                                        elide: Text.ElideRight
+                                        font.pointSize: 8
+                                        color: cell.dayItems[index].overdue
+                                               ? "#e74c3c" : palette.text
+                                        opacity: cell.inMonth ? 0.9 : 0.4
+                                    }
+                                }
+                                Label {
+                                    visible: cell.dayItems.length > 3
+                                    text: qsTr("+%1 more").arg(cell.dayItems.length - 3)
+                                    font.pointSize: 8
+                                    opacity: 0.5
+                                }
+                                Item { Layout.fillHeight: true }
+                            }
+                        }
+                    }
+                }
+                    Item { Layout.fillHeight: true }
+                }
+
+                // Selected-day detail.
+                ColumnLayout {
+                    Layout.preferredWidth: 220
+                    Layout.fillHeight: true
+                    spacing: 6
+
+                    Label {
+                        text: calendarPane.longDate(calendarPane.selectedIso)
+                        font.bold: true
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+                    Repeater {
+                        model: calendarPane.byDay[calendarPane.selectedIso] || []
+                        delegate: ItemDelegate {
+                            required property var modelData
+                            Layout.fillWidth: true
+                            contentItem: ColumnLayout {
+                                spacing: 0
+                                Label {
+                                    text: modelData.title
+                                    elide: Text.ElideRight
+                                    Layout.fillWidth: true
+                                    color: modelData.overdue ? "#e74c3c" : palette.text
+                                }
+                                Label {
+                                    visible: modelData.project !== ""
+                                    text: modelData.project
+                                    font.pointSize: 8
+                                    opacity: 0.6
+                                }
+                            }
+                        }
+                    }
+                    Label {
+                        visible: (calendarPane.byDay[calendarPane.selectedIso] || []).length === 0
+                        text: qsTr("Nothing due")
+                        opacity: 0.5
+                    }
+                    Item { Layout.fillHeight: true }
+                }
+            }
+
+            // ---- Agenda mode: date-grouped list ---------------------
+            ScrollView {
+                visible: calendarPane.mode === "agenda"
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+
+                ColumnLayout {
+                    width: parent.width
+                    spacing: 4
+
+                    Repeater {
+                        model: calendarPane.agenda
+                        delegate: ColumnLayout {
+                            required property var modelData
+                            Layout.fillWidth: true
+                            spacing: 2
+
+                            Label {
+                                text: modelData.label
+                                font.bold: true
+                                Layout.topMargin: 6
+                            }
+                            Repeater {
+                                model: modelData.items
+                                delegate: RowLayout {
+                                    required property var modelData
+                                    Layout.fillWidth: true
+                                    Layout.leftMargin: 8
+                                    Label {
+                                        text: modelData.title
+                                        elide: Text.ElideRight
+                                        Layout.fillWidth: true
+                                        color: modelData.overdue
+                                               ? "#e74c3c" : palette.text
+                                    }
+                                    Label {
+                                        visible: modelData.project !== ""
+                                        text: modelData.project
+                                        font.pointSize: 8
+                                        opacity: 0.6
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Label {
+                        visible: calendarPane.agenda.length === 0
+                        text: qsTr("No upcoming deadlines")
+                        opacity: 0.5
+                        Layout.topMargin: 6
+                    }
+                    Item { Layout.fillHeight: true }
                 }
             }
         }
