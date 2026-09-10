@@ -1082,69 +1082,15 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         spacing: 4
 
-                        // Nesting indent with tree guide lines. One column per
-                        // ancestor level; `branchMask` says which run full
-                        // height (branch continues) vs. stop at the connector
-                        // (last child). The deepest column also gets the elbow.
-                        // Rectangles overshoot the row vertically so the lines
-                        // stay continuous across the gap between rows.
+                        // Reserves the indent + expander width. The guide
+                        // lines and the collapse/expand box that fill this
+                        // space are drawn by `guides` (below), a full-height
+                        // overlay outside this RowLayout - so a line that
+                        // continues past the row runs unbroken through the
+                        // delegate padding and an open info panel.
                         Item {
-                            visible: rowItem.depth > 0
-                            Layout.preferredWidth: rowItem.depth * 18
-                            Layout.fillHeight: true
-
-                            Repeater {
-                                model: rowItem.depth
-                                delegate: Item {
-                                    required property int index
-                                    readonly property bool lastCol: index === rowItem.depth - 1
-                                    readonly property bool pipe:
-                                        rowItem.branchMask.charAt(index) === "1"
-                                    x: index * 18
-                                    width: 18
-                                    height: mainRow.height
-
-                                    Rectangle {
-                                        x: 9
-                                        width: 1
-                                        color: palette.text
-                                        opacity: 0.22
-                                        y: -14
-                                        height: parent.lastCol
-                                                ? (parent.pipe ? parent.height + 28 : parent.height / 2 + 14)
-                                                : (parent.pipe ? parent.height + 28 : 0)
-                                    }
-                                    Rectangle {
-                                        visible: parent.lastCol
-                                        x: 9
-                                        y: parent.height / 2
-                                        width: 10
-                                        height: 1
-                                        color: palette.text
-                                        opacity: 0.22
-                                    }
-                                }
-                            }
-                        }
-
-                        // Expand/collapse control. A plain Label + MouseArea
-                        // (which consumes the click, so the row's own click -
-                        // open the info panel - does not also fire). ASCII
-                        // "[+]" / "[-]" - the system font has no arrow glyphs.
-                        Label {
-                            Layout.preferredWidth: 26
-                            horizontalAlignment: Text.AlignHCenter
-                            text: rowItem.hasChildren ? (rowItem.expanded ? "[-]" : "[+]") : ""
-                            color: disclosureArea.containsMouse ? palette.highlight : palette.text
-                            font.pointSize: 11
-
-                            MouseArea {
-                                id: disclosureArea
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                enabled: rowItem.hasChildren && !tasks.selectionMode
-                                onClicked: tasks.toggleExpanded(rowItem.index)
-                            }
+                            Layout.preferredWidth: (rowItem.depth + 1) * 18
+                            Layout.minimumWidth: (rowItem.depth + 1) * 18
                         }
 
                         CheckBox {
@@ -1420,6 +1366,133 @@ ApplicationWindow {
                             }
                         }
                     }
+                    }
+
+                    // Nesting guides + collapse/expand box, one coupled
+                    // component on an 18px grid. Columns 0..depth-1 are
+                    // ancestor guide lines (`branchMask` marks the ones that
+                    // continue past this row); column `depth` carries the box,
+                    // wired to the parent guide above and the first child's
+                    // guide below. Drawn here, as a direct child of the
+                    // delegate spanning its full height, so a continuing line
+                    // is unbroken from one row to the next - through the
+                    // delegate padding and an open info panel - and every
+                    // segment is the same single ink (no doubled-up, darker
+                    // overlap in the gap between rows).
+                    Item {
+                        id: guides
+
+                        anchors.left: parent.left
+                        anchors.leftMargin: rowItem.leftPadding
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        width: (rowItem.depth + 1) * 18
+
+                        readonly property color ink: palette.text
+                        readonly property real fade: 0.35
+                        // Vertical centre of the task row, in delegate coords:
+                        // the content sits below `topPadding`, `mainRow` is its
+                        // first child.
+                        readonly property real mid: rowItem.topPadding + mainRow.height / 2
+                        // A line that continues also covers the gap to the next
+                        // row, so the guide never breaks between rows.
+                        readonly property real span: height + list.spacing
+
+                        // Ancestor guide columns.
+                        Repeater {
+                            model: rowItem.depth
+                            delegate: Item {
+                                required property int index
+                                readonly property bool connector:
+                                    index === rowItem.depth - 1
+                                readonly property bool carries:
+                                    rowItem.branchMask.charAt(index) === "1"
+                                x: index * 18
+                                width: 18
+                                height: guides.height
+
+                                // Vertical guide. The connector column always
+                                // drops in from above to meet this row; it
+                                // carries on down only if a sibling follows.
+                                Rectangle {
+                                    x: 9
+                                    width: 1
+                                    color: guides.ink
+                                    opacity: guides.fade
+                                    y: 0
+                                    height: parent.connector
+                                            ? (parent.carries ? guides.span : guides.mid)
+                                            : (parent.carries ? guides.span : 0)
+                                }
+                                // Elbow into this row.
+                                Rectangle {
+                                    visible: parent.connector
+                                    x: 9
+                                    y: guides.mid
+                                    width: 11
+                                    height: 1
+                                    color: guides.ink
+                                    opacity: guides.fade
+                                }
+                            }
+                        }
+
+                        // Collapse/expand column.
+                        Item {
+                            visible: rowItem.hasChildren
+                            x: rowItem.depth * 18
+                            width: 18
+                            height: guides.height
+
+                            // Stub from the box down to the first child's guide.
+                            Rectangle {
+                                visible: rowItem.expanded
+                                x: 9
+                                width: 1
+                                y: guides.mid + 7
+                                height: guides.span - (guides.mid + 7)
+                                color: guides.ink
+                                opacity: guides.fade
+                            }
+                            // The box: a "-" bar always, plus a "|" bar when
+                            // collapsed (making a "+"). Same ink as the guides
+                            // - only the hover tint sets it apart.
+                            Rectangle {
+                                x: 2.5
+                                y: guides.mid - 6.5
+                                width: 13
+                                height: 13
+                                radius: 2
+                                color: "transparent"
+                                border.width: 1
+                                border.color: disc.containsMouse
+                                              ? palette.highlight : guides.ink
+                                opacity: disc.containsMouse ? 1.0 : guides.fade
+
+                                Rectangle {
+                                    x: 3
+                                    y: 6
+                                    width: 7
+                                    height: 1
+                                    color: parent.border.color
+                                }
+                                Rectangle {
+                                    visible: !rowItem.expanded
+                                    x: 6
+                                    y: 3
+                                    width: 1
+                                    height: 7
+                                    color: parent.border.color
+                                }
+                            }
+                            MouseArea {
+                                id: disc
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                enabled: !tasks.selectionMode
+                                onClicked: tasks.toggleExpanded(rowItem.index)
+                            }
+                        }
                     }
 
                     TapHandler {
