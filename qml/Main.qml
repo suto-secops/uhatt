@@ -34,6 +34,11 @@ ApplicationWindow {
     // Bumped once a second while a timer runs, to re-evaluate elapsed-time bindings.
     property int tick: 0
 
+    // A graceful close still counts the time worked up to this moment: stamp a
+    // final heartbeat so startup recovery closes the open entry at ~now, not at
+    // the last periodic tick. A hard crash falls back to that periodic tick.
+    onClosing: if (timer.runningSince !== "") timer.heartbeat()
+
     // Now, as "yyyy-MM-dd HH:mm" - the format the entry editor expects.
     function localNow() {
         return Qt.formatDateTime(new Date(), "yyyy-MM-dd hh:mm")
@@ -344,10 +349,11 @@ ApplicationWindow {
         onTriggered: root.tick++
     }
 
-    // Keep meta.timer_heartbeat fresh so a crash can be recovered to within
-    // ~30 s. Only runs while a segment is actually counting.
+    // Keep meta.timer_heartbeat fresh so even a hard kill (SIGKILL, power loss)
+    // is recovered to within ~2 s. A graceful close is exact via root.onClosing.
+    // Only runs while a segment is actually counting; one tiny UPSERT per tick.
     Timer {
-        interval: 30000
+        interval: 2000
         repeat: true
         running: timer.runningSince !== ""
         triggeredOnStart: true
