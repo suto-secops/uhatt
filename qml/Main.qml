@@ -786,15 +786,33 @@ ApplicationWindow {
             }
         }
 
-        RowLayout {
+        SplitView {
+            id: mainSplit
             Layout.fillWidth: true
             Layout.fillHeight: true
-            spacing: 12
+            orientation: Qt.Horizontal
+
+            // A grabbable divider (the Basic style's default is a hairline).
+            handle: Rectangle {
+                implicitWidth: 8
+                color: SplitHandle.pressed ? palette.highlight
+                     : SplitHandle.hovered ? Qt.rgba(palette.highlight.r,
+                                                     palette.highlight.g,
+                                                     palette.highlight.b, 0.4)
+                     : "transparent"
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: 1
+                    height: parent.height
+                    color: palette.mid
+                }
+            }
 
         // ---- Sidebar -----------------------------------------------------
         ColumnLayout {
-            Layout.preferredWidth: 190
-            Layout.fillHeight: true
+            SplitView.preferredWidth: 200
+            SplitView.minimumWidth: 160
+            SplitView.maximumWidth: 420
             spacing: 4
 
             Label {
@@ -836,7 +854,11 @@ ApplicationWindow {
             ListView {
                 id: projectList
                 Layout.fillWidth: true
-                Layout.fillHeight: true
+                // As tall as its content, capped; scrolls past the cap. Not
+                // `fillHeight` - the trailing spacer takes the slack so the
+                // "Others" section sits directly under the list, not at the
+                // bottom of the sidebar.
+                Layout.preferredHeight: Math.min(contentHeight, 320)
                 clip: true
                 model: projects
 
@@ -912,6 +934,26 @@ ApplicationWindow {
                 }
             }
 
+            // ---- Others (directly under the project list) --------------
+            MenuSeparator {
+                Layout.fillWidth: true
+            }
+            Label {
+                text: qsTr("Others")
+                font.bold: true
+                Layout.topMargin: 2
+            }
+            ItemDelegate {
+                Layout.fillWidth: true
+                text: qsTr("Calendar")
+                highlighted: root.mainView === "calendar"
+                onClicked: root.mainView = "calendar"
+            }
+
+            // ---- New project ----------------------------------------
+            MenuSeparator {
+                Layout.fillWidth: true
+            }
             RowLayout {
                 Layout.fillWidth: true
                 TextField {
@@ -933,31 +975,18 @@ ApplicationWindow {
                 }
             }
 
-            // ---- Others -------------------------------------------------
-            MenuSeparator {
-                Layout.fillWidth: true
-            }
-            Label {
-                text: qsTr("Others")
-                font.bold: true
-                Layout.topMargin: 2
-            }
-            ItemDelegate {
-                Layout.fillWidth: true
-                text: qsTr("Calendar")
-                highlighted: root.mainView === "calendar"
-                onClicked: root.mainView = "calendar"
-            }
+            // Slack, so the sidebar's contents sit at the top.
+            Item { Layout.fillHeight: true }
         }
 
-        ToolSeparator {
-            Layout.fillHeight: true
-        }
+        // ---- Centre pane: task list or calendar ----------------------
+        StackLayout {
+            SplitView.fillWidth: true
+            currentIndex: root.mainView === "calendar" ? 1 : 0
 
         // ---- Tasks -----------------------------------------------------
         ColumnLayout {
             id: taskPane
-            visible: root.mainView === "tasks"
             Layout.fillWidth: true
             Layout.fillHeight: true
             spacing: 8
@@ -1741,7 +1770,6 @@ ApplicationWindow {
         // ---- Calendar page -------------------------------------------
         ColumnLayout {
             id: calendarPane
-            visible: root.mainView === "calendar"
             Layout.fillWidth: true
             Layout.fillHeight: true
             spacing: 8
@@ -2056,6 +2084,7 @@ ApplicationWindow {
                     Item { Layout.fillHeight: true }
                 }
             }
+        }
         }
         }
     }
