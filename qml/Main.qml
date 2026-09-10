@@ -441,10 +441,62 @@ ApplicationWindow {
         onTriggered: timer.heartbeat()
     }
 
+    // App-level settings, opened from the toolbar gear.
+    Menu {
+        id: settingsMenu
+        width: 200
+        MenuItem {
+            text: qsTr("Show finished tasks")
+            checkable: true
+            checked: tasks.showDone
+            onToggled: tasks.showDone = checked
+        }
+    }
+
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: 12
         spacing: 8
+
+        // ---- Toolbar -------------------------------------------------
+        RowLayout {
+            Layout.fillWidth: true
+            Item { Layout.fillWidth: true }
+            ToolButton {
+                id: settingsButton
+                focusPolicy: Qt.NoFocus
+                implicitWidth: 30
+                implicitHeight: 30
+                ToolTip.text: qsTr("Settings")
+                ToolTip.visible: hovered
+                onClicked: settingsMenu.popup(settingsButton,
+                                              settingsButton.width - settingsMenu.width,
+                                              settingsButton.height)
+                contentItem: Canvas {
+                    property color ink: palette.buttonText
+                    onInkChanged: requestPaint()
+                    onPaint: {
+                        let ctx = getContext("2d")
+                        ctx.reset()
+                        ctx.fillStyle = ink
+                        ctx.strokeStyle = ink
+                        ctx.lineWidth = 1.6
+                        let cx = width / 2
+                        let cy = height / 2
+                        for (let i = 0; i < 8; i++) {
+                            ctx.save()
+                            ctx.translate(cx, cy)
+                            ctx.rotate(i * Math.PI / 4)
+                            ctx.fillRect(-1.4, -7, 2.8, 4)
+                            ctx.restore()
+                        }
+                        ctx.beginPath()
+                        ctx.arc(cx, cy, 4, 0, 2 * Math.PI)
+                        ctx.stroke()
+                    }
+                }
+            }
+        }
 
         // ---- Running-timer bar ----------------------------------------
         Frame {
@@ -510,15 +562,11 @@ ApplicationWindow {
             Layout.fillHeight: true
             spacing: 4
 
-            Label {
-                text: qsTr("Projects")
-                font.bold: true
-            }
-
+            // Built-in views: every task, the ones with no project, the archive.
             Repeater {
                 model: [
                     { key: "", label: qsTr("All tasks") },
-                    { key: "unfiled", label: qsTr("Unfiled") },
+                    { key: "unfiled", label: qsTr("Tasks w/o project") },
                     { key: "finished", label: qsTr("Finished") },
                 ]
                 delegate: ItemDelegate {
@@ -530,17 +578,14 @@ ApplicationWindow {
                 }
             }
 
-            CheckBox {
-                Layout.fillWidth: true
-                text: qsTr("Show finished")
-                font.pointSize: 9
-                visible: tasks.projectFilter !== "finished"
-                checked: tasks.showDone
-                onToggled: tasks.showDone = checked
-            }
-
             MenuSeparator {
                 Layout.fillWidth: true
+            }
+
+            Label {
+                text: qsTr("Projects")
+                font.bold: true
+                Layout.topMargin: 2
             }
 
             ListView {
