@@ -651,19 +651,62 @@ ApplicationWindow {
                             opacity: rowItem.overdue ? 1 : 0.7
                         }
 
+                        // Primary row action: start / stop the timer. Always
+                        // visible and labelled - a bare icon read as a mystery
+                        // button. The play/stop mark is drawn (Canvas) because
+                        // the system font has no media glyphs.
                         Button {
-                            implicitWidth: 62
                             padding: 4
-                            opacity: (rowItem.hovered || rowItem.running) ? 1 : 0
-                            text: rowItem.running ? qsTr("Stop") : qsTr("Start")
+                            leftPadding: 8
+                            rightPadding: 8
                             onClicked: timer.toggle(rowItem.id)
+                            ToolTip.text: rowItem.running ? qsTr("Stop the timer")
+                                                          : qsTr("Start timing this task")
+                            ToolTip.visible: hovered
+
+                            contentItem: Row {
+                                spacing: 6
+
+                                Canvas {
+                                    id: timerGlyph
+                                    width: 10
+                                    height: 10
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    property bool running: rowItem.running
+                                    property color mark: rowItem.running ? "#e74c3c"
+                                                                         : palette.buttonText
+                                    onRunningChanged: requestPaint()
+                                    onMarkChanged: requestPaint()
+                                    onPaint: {
+                                        var ctx = getContext("2d")
+                                        ctx.reset()
+                                        ctx.fillStyle = mark
+                                        if (running) {
+                                            ctx.fillRect(1, 1, 8, 8)
+                                        } else {
+                                            ctx.beginPath()
+                                            ctx.moveTo(1, 0)
+                                            ctx.lineTo(10, 5)
+                                            ctx.lineTo(1, 10)
+                                            ctx.closePath()
+                                            ctx.fill()
+                                        }
+                                    }
+                                }
+
+                                Label {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: rowItem.running ? qsTr("Stop") : qsTr("Timer")
+                                    font.pointSize: 9
+                                }
+                            }
                         }
 
                         Button {
                             id: moreButton
                             implicitWidth: 30
                             padding: 4
-                            opacity: (rowItem.hovered || down) ? 1 : 0.35
+                            opacity: (rowItem.hovered || down) ? 1 : 0.5
                             ToolTip.text: qsTr("More actions")
                             ToolTip.visible: hovered
                             onClicked: rowMenu.popup()
