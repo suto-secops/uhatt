@@ -798,6 +798,7 @@ ApplicationWindow {
                 model: [
                     { key: "", label: qsTr("All tasks") },
                     { key: "unfiled", label: qsTr("Tasks w/o project") },
+                    { key: "deadlined", label: qsTr("Deadlined") },
                     { key: "finished", label: qsTr("Finished") },
                 ]
                 delegate: ItemDelegate {
@@ -923,15 +924,22 @@ ApplicationWindow {
 
         // ---- Tasks -----------------------------------------------------
         ColumnLayout {
+            id: taskPane
             Layout.fillWidth: true
             Layout.fillHeight: true
             spacing: 8
+
+            // Read-only, derived views: no add field, no scope total. New
+            // tasks would have no project / no deadline and vanish on reload.
+            readonly property bool derivedView:
+                tasks.projectFilter === "finished"
+                || tasks.projectFilter === "deadlined"
 
             // Time recorded across everything in the current view (a project,
             // "All tasks", or the project-less ones).
             Label {
                 Layout.fillWidth: true
-                visible: tasks.projectFilter !== "finished" && tasks.viewTotalText !== ""
+                visible: !taskPane.derivedView && tasks.viewTotalText !== ""
                 text: qsTr("Time invested: %1").arg(tasks.viewTotalText)
                 font.pointSize: 9
                 opacity: 0.7
@@ -949,11 +957,11 @@ ApplicationWindow {
                     onToggled: tasks.selectionMode = checked
                 }
 
-                // --- add a task (hidden while picking / on Finished) ---
+                // --- add a task (hidden while picking / on a derived view) ---
                 TextField {
                     id: input
                     Layout.fillWidth: true
-                    visible: !tasks.selectionMode && tasks.projectFilter !== "finished"
+                    visible: !tasks.selectionMode && !taskPane.derivedView
                     placeholderText: qsTr("New task, then Enter")
                     onAccepted: {
                         tasks.add(text)
@@ -961,7 +969,7 @@ ApplicationWindow {
                     }
                 }
                 Button {
-                    visible: !tasks.selectionMode && tasks.projectFilter !== "finished"
+                    visible: !tasks.selectionMode && !taskPane.derivedView
                     text: qsTr("Add")
                     enabled: input.text.trim().length > 0
                     onClicked: {

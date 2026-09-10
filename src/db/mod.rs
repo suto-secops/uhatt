@@ -286,6 +286,56 @@ pub fn list_finished_tasks(conn: &Connection) -> rusqlite::Result<Vec<TaskNode>>
     rows.collect()
 }
 
+/// The task tree pruned to deadline-bearing work: a task is kept when it has a
+/// deadline of its own, or any descendant does (so the chain from the root down
+/// stays connected). Done tasks truncate a branch, exactly as in
+/// [`list_task_tree`]. Result is pre-ordered and branch-annotated over the
+/// *pruned* set, so the guide lines match what is actually on screen.
+pub fn list_deadlined_tree(conn: &Connection) -> rusqlite::Result<Vec<TaskNode>> {
+    let sql = format!(
+        "WITH RECURSIVE
+             -- deadline-bearing tasks, then their ancestor chain - but the
+             -- walk stops at a done task, so a deadline buried under a
+             -- finished parent keeps nothing (that branch is hidden anyway).
+             keep(id) AS (
+                 SELECT id FROM tasks
+                 WHERE deadline IS NOT NULL AND status <> 'done'
+               UNION
+                 SELECT t.parent_task_id
+                 FROM tasks t JOIN keep k ON t.id = k.id
+                 WHERE t.parent_task_id IS NOT NULL AND t.status <> 'done'
+             ),
+             subtree(task_id, depth, sort_path) AS (
+                 SELECT id, 0, printf('%020.6f', sort_order)
+                 FROM tasks
+                 WHERE parent_task_id IS NULL AND status <> 'done'
+                   AND id IN (SELECT id FROM keep)
+               UNION ALL
+                 SELECT t.id, s.depth + 1,
+                        s.sort_path || '/' || printf('%020.6f', t.sort_order)
+                 FROM tasks t JOIN subtree s ON t.parent_task_id = s.task_id
+                 WHERE t.status <> 'done'
+                   AND t.id IN (SELECT id FROM keep)
+             )
+         SELECT {TASK_COLUMNS},
+                subtree.depth,
+                EXISTS(SELECT 1 FROM tasks c
+                       WHERE c.parent_task_id = tasks.id
+                         AND c.status <> 'done'
+                         AND c.id IN (SELECT id FROM keep)),
+                (tasks.deadline IS NOT NULL
+                    AND tasks.deadline < {TODAY}
+                    AND tasks.status <> 'done')
+         FROM tasks JOIN subtree ON tasks.id = subtree.task_id
+         ORDER BY subtree.sort_path"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], map_task_node)?;
+    let mut nodes: Vec<TaskNode> = rows.collect::<rusqlite::Result<_>>()?;
+    annotate_branches(&mut nodes);
+    Ok(nodes)
+}
+
 /// Delete a task; subtasks cascade.
 pub fn delete_task(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
@@ -1331,6 +1381,55 @@ mod tests {
         assert_eq!(cd(&at("'+8 days'"), Optimal), "1 week and 1 day");
         assert_eq!(cd(&at("'+14 days'"), Optimal), "2 weeks");
         assert!(cd(&at("'+1 month','+3 days'"), Optimal).starts_with("1 month"));
+    }
+
+    #[test]
+    fn deadlined_tree_keeps_deadline_bearing_branches_and_their_ancestors() {
+        let conn = open_in_memory().unwrap();
+
+        let a = root(&conn, "A");
+        let a1 = child(&conn, "A1", &a.id);
+        let a1a = child(&conn, "A1a", &a1.id);
+        child(&conn, "A2", &a.id); // sibling of A1, no deadline -> dropped
+        set_task_deadline(&conn, &a1a.id, Some("2099-01-01")).unwrap();
+
+        let b = root(&conn, "B");
+        child(&conn, "B1", &b.id); // no deadline -> dropped
+        set_task_deadline(&conn, &b.id, Some("2000-01-01")).unwrap();
+
+        let c = root(&conn, "C");
+        child(&conn, "C1", &c.id); // nothing deadlined here -> C dropped entirely
+
+        // A deadline buried under a done parent stays hidden.
+        let d = root(&conn, "D");
+        let d1 = child(&conn, "D1", &d.id);
+        let d1a = child(&conn, "D1a", &d1.id);
+        set_task_deadline(&conn, &d1a.id, Some("2099-06-01")).unwrap();
+        set_task_status(&conn, &d1.id, TaskStatus::Done).unwrap();
+
+        let tree = list_deadlined_tree(&conn).unwrap();
+        let shape: Vec<_> = tree
+            .iter()
+            .map(|n| {
+                (
+                    n.task.title.as_str(),
+                    n.depth,
+                    n.has_children,
+                    n.is_last_child,
+                    n.overdue,
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("A", 0, true, false, false),
+                // A1 is now the last visible child of A (A2 was pruned).
+                ("A1", 1, true, true, false),
+                ("A1a", 2, false, true, false),
+                ("B", 0, false, true, true),
+            ]
+        );
     }
 
     #[test]
