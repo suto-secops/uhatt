@@ -263,6 +263,16 @@ pub fn rename_task(conn: &Connection, id: &str, title: &str) -> rusqlite::Result
     Ok(())
 }
 
+/// Set a task's free-text notes / description (stored verbatim, trailing
+/// whitespace trimmed).
+pub fn set_task_notes(conn: &Connection, id: &str, notes: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE tasks SET notes = ?2 WHERE id = ?1",
+        params![id, notes.trim_end()],
+    )?;
+    Ok(())
+}
+
 /// True for an ISO calendar date, `YYYY-MM-DD`.
 fn is_iso_date(s: &str) -> bool {
     let b = s.as_bytes();

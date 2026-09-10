@@ -893,16 +893,44 @@ ApplicationWindow {
                     required property bool expanded
                     required property string deadline
                     required property bool overdue
+                    required property string notes
 
                     readonly property bool sessionTask: rowItem.id === timer.runningTaskId
                     readonly property bool running: rowItem.sessionTask && !timer.paused
                     readonly property bool paused: rowItem.sessionTask && timer.paused
 
+                    // Click opens an info panel; renaming is deliberate (double-
+                    // click the title, the ⋯ menu, or click the title while the
+                    // panel is already open).
+                    property bool infoOpen: false
+                    property bool editing: false
+
+                    function startEdit() {
+                        rowItem.infoOpen = true
+                        rowItem.editing = true
+                        titleEdit.forceActiveFocus()
+                        titleEdit.selectAll()
+                    }
+                    function endEdit(commit) {
+                        if (commit && titleEdit.text.trim() !== ""
+                                && titleEdit.text !== rowItem.title)
+                            tasks.rename(rowItem.index, titleEdit.text)
+                        rowItem.editing = false
+                    }
+
                     width: list.width
                     leftPadding: 8 + depth * 18
                     opacity: done ? 0.5 : 1.0
 
-                    contentItem: RowLayout {
+                    onClicked: if (!rowItem.editing) rowItem.infoOpen = !rowItem.infoOpen
+                    onInfoOpenChanged: if (rowItem.infoOpen)
+                        infoPanel.timeText = tasks.timeInvestedText(rowItem.index)
+
+                    contentItem: ColumnLayout {
+                        spacing: 4
+
+                    RowLayout {
+                        Layout.fillWidth: true
                         spacing: 4
 
                         // Expand/collapse control. A plain Label + TapHandler rather than
@@ -921,6 +949,9 @@ ApplicationWindow {
                             }
                             TapHandler {
                                 enabled: rowItem.hasChildren
+                                // Exclusive grab so the row's own click (open
+                                // info panel) doesn't also fire.
+                                gesturePolicy: TapHandler.ReleaseWithinBounds
                                 onTapped: tasks.toggleExpanded(rowItem.index)
                             }
                         }
@@ -931,17 +962,51 @@ ApplicationWindow {
                             onToggled: tasks.setDone(rowItem.index, checked)
                         }
 
-                        TextField {
+                        // Title: a plain label until you deliberately edit it.
+                        // The click target is only as wide as the text, so the
+                        // rest of the row still toggles the info panel.
+                        Item {
                             Layout.fillWidth: true
-                            text: rowItem.title
-                            padding: 4
-                            font.strikeout: rowItem.done
-                            background: Rectangle {
-                                color: "transparent"
+                            implicitHeight: Math.max(titleLabel.implicitHeight,
+                                                     titleEdit.implicitHeight)
+
+                            Label {
+                                id: titleLabel
+                                anchors.left: parent.left
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: Math.min(parent.width, implicitWidth)
+                                visible: !rowItem.editing
+                                text: rowItem.title
+                                font.strikeout: rowItem.done
+                                elide: Text.ElideRight
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    enabled: !rowItem.editing
+                                    onClicked: {
+                                        if (rowItem.infoOpen)
+                                            rowItem.startEdit()
+                                        else
+                                            rowItem.infoOpen = true
+                                    }
+                                    onDoubleClicked: rowItem.startEdit()
+                                }
                             }
-                            onEditingFinished: {
-                                if (text !== rowItem.title)
-                                    tasks.rename(rowItem.index, text)
+                            TextField {
+                                id: titleEdit
+                                anchors.fill: parent
+                                visible: rowItem.editing
+                                text: rowItem.title
+                                padding: 4
+                                background: Rectangle {
+                                    color: "transparent"
+                                    border.color: palette.highlight
+                                    border.width: 1
+                                    radius: 2
+                                }
+                                onAccepted: rowItem.endEdit(true)
+                                onActiveFocusChanged: if (!activeFocus && rowItem.editing)
+                                    rowItem.endEdit(true)
                             }
                         }
 
@@ -1055,6 +1120,87 @@ ApplicationWindow {
                         }
                     }
 
+                    // ---- Info panel: description, deadline, time invested ----
+                    Frame {
+                        id: infoPanel
+                        Layout.fillWidth: true
+                        visible: rowItem.infoOpen
+                        padding: 8
+
+                        // Refreshed each time the panel opens.
+                        property string timeText: ""
+
+                        contentItem: ColumnLayout {
+                            spacing: 6
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label {
+                                    text: qsTr("Time invested:")
+                                    font.pointSize: 9
+                                    opacity: 0.7
+                                }
+                                Label {
+                                    text: infoPanel.timeText
+                                    font.pointSize: 9
+                                }
+                                Item { Layout.fillWidth: true }
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label {
+                                    text: qsTr("Deadline:")
+                                    font.pointSize: 9
+                                    opacity: 0.7
+                                }
+                                Label {
+                                    text: rowItem.deadline !== "" ? rowItem.deadline
+                                                                  : qsTr("none")
+                                    font.pointSize: 9
+                                    color: rowItem.overdue ? "#e74c3c" : palette.text
+                                }
+                                Item { Layout.fillWidth: true }
+                                Button {
+                                    text: qsTr("Set…")
+                                    font.pointSize: 8
+                                    padding: 3
+                                    onClicked: datePopup.open()
+                                }
+                                Button {
+                                    text: qsTr("Clear")
+                                    font.pointSize: 8
+                                    padding: 3
+                                    enabled: rowItem.deadline !== ""
+                                    onClicked: tasks.setDeadline(rowItem.index, "")
+                                }
+                            }
+
+                            Label {
+                                text: qsTr("Description")
+                                font.pointSize: 9
+                                opacity: 0.7
+                            }
+                            TextArea {
+                                id: notesArea
+                                Layout.fillWidth: true
+                                Layout.minimumHeight: 52
+                                text: rowItem.notes
+                                wrapMode: TextArea.Wrap
+                                placeholderText: qsTr("Add a description…")
+                                background: Rectangle {
+                                    color: "transparent"
+                                    border.color: palette.mid
+                                    border.width: 1
+                                    radius: 2
+                                }
+                                onActiveFocusChanged: if (!activeFocus && text !== rowItem.notes)
+                                    tasks.setNotes(rowItem.index, text)
+                            }
+                        }
+                    }
+                    }
+
                     TapHandler {
                         acceptedButtons: Qt.RightButton
                         onTapped: rowMenu.popup()
@@ -1063,6 +1209,10 @@ ApplicationWindow {
                     Menu {
                         id: rowMenu
 
+                        MenuItem {
+                            text: qsTr("Rename")
+                            onTriggered: rowItem.startEdit()
+                        }
                         MenuItem {
                             text: qsTr("Add subtask")
                             onTriggered: tasks.addChild(rowItem.index, qsTr("New subtask"))
