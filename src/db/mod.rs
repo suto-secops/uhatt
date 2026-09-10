@@ -488,6 +488,61 @@ pub fn set_task_project(
     Ok(())
 }
 
+/// Whether `task_id` may be re-parented under `new_parent` - both must exist,
+/// they must differ, and `new_parent` must not sit inside `task_id`'s subtree
+/// (which would make a cycle).
+pub fn can_reparent(conn: &Connection, task_id: &str, new_parent: &str) -> rusqlite::Result<bool> {
+    if task_id == new_parent {
+        return Ok(false);
+    }
+    let in_subtree: bool = conn.query_row(
+        "WITH RECURSIVE subtree(id) AS (
+             SELECT ?1
+           UNION ALL
+             SELECT t.id FROM tasks t JOIN subtree s ON t.parent_task_id = s.id
+         )
+         SELECT EXISTS(SELECT 1 FROM subtree WHERE id = ?2)",
+        params![task_id, new_parent],
+        |r| r.get::<_, i64>(0).map(|n| n != 0),
+    )?;
+    if in_subtree {
+        return Ok(false);
+    }
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1)
+             AND EXISTS(SELECT 1 FROM tasks WHERE id = ?2)",
+        params![task_id, new_parent],
+        |r| r.get::<_, i64>(0).map(|n| n != 0),
+    )
+}
+
+/// Re-parent `task_id` (with its whole subtree) under `new_parent`: sets its
+/// `parent_task_id`, places it last among the new parent's children, and
+/// propagates the new parent's `project_id` down the subtree. No-op when
+/// [`can_reparent`] would reject the move.
+pub fn reparent_task(conn: &Connection, task_id: &str, new_parent: &str) -> rusqlite::Result<()> {
+    if !can_reparent(conn, task_id, new_parent)? {
+        return Ok(());
+    }
+    let sort_order: f64 = conn.query_row(
+        "SELECT COALESCE(MAX(sort_order), 0) + 1.0 FROM tasks WHERE parent_task_id = ?1",
+        params![new_parent],
+        |r| r.get(0),
+    )?;
+    conn.execute(
+        "UPDATE tasks SET parent_task_id = ?2, sort_order = ?3 WHERE id = ?1",
+        params![task_id, new_parent, sort_order],
+    )?;
+    // Subtasks inherit their parent's project.
+    let project: Option<String> = conn.query_row(
+        "SELECT project_id FROM tasks WHERE id = ?1",
+        params![new_parent],
+        |r| r.get(0),
+    )?;
+    set_task_project(conn, task_id, project.as_deref())?;
+    Ok(())
+}
+
 // --- Projects -------------------------------------------------------------
 
 const PROJECT_COLUMNS: &str = "id, name, tracked, archived, created_at";
@@ -1165,6 +1220,43 @@ mod tests {
 
         delete_task(&conn, &parent.id).unwrap();
         assert!(titles(&conn).is_empty());
+    }
+
+    #[test]
+    fn reparent_moves_subtree_and_carries_project() {
+        let conn = open_in_memory().unwrap();
+        let proj = create_project(&conn, "P").unwrap();
+        let a = create_task(&conn, "A", None, Some(&proj.id)).unwrap();
+        let b = root(&conn, "B"); // no project
+        let b1 = child(&conn, "B1", &b.id);
+
+        // Cycle / self guards.
+        assert!(!can_reparent(&conn, &b.id, &b.id).unwrap());
+        assert!(!can_reparent(&conn, &b.id, &b1.id).unwrap()); // onto own child
+        assert!(!can_reparent(&conn, &b.id, "ghost").unwrap());
+        assert!(can_reparent(&conn, &b.id, &a.id).unwrap());
+
+        // Move B (and B1) under A: B becomes A's child, both gain A's project.
+        reparent_task(&conn, &b.id, &a.id).unwrap();
+        let tree = list_task_tree(&conn, &ProjectFilter::All, true).unwrap();
+        let by = |id: &str| tree.iter().find(|n| n.task.id == id).unwrap();
+        assert_eq!(by(&b.id).task.parent_id.as_deref(), Some(a.id.as_str()));
+        assert_eq!(by(&b.id).task.project_id.as_deref(), Some(proj.id.as_str()));
+        assert_eq!(
+            by(&b1.id).task.project_id.as_deref(),
+            Some(proj.id.as_str())
+        );
+        assert_eq!(by(&b.id).depth, 1);
+        assert_eq!(by(&b1.id).depth, 2);
+
+        // A rejected move leaves everything as it was.
+        reparent_task(&conn, &a.id, &b1.id).unwrap(); // would be a cycle
+        assert_eq!(
+            list_task_tree(&conn, &ProjectFilter::All, true).unwrap()[0]
+                .task
+                .id,
+            a.id
+        );
     }
 
     #[test]
