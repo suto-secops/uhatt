@@ -20,11 +20,13 @@ ApplicationWindow {
         return Qt.formatDate(d, "yyyy-MM-dd")
     }
 
-    // Seconds between `sinceIso` and now as HH:MM:SS.
-    function fmtDuration(sinceIso) {
-        if (!sinceIso)
-            return "00:00:00"
-        let secs = Math.max(0, Math.floor((Date.now() - Date.parse(sinceIso)) / 1000))
+    // `baseSecs` of already-counted time plus the live segment since `sinceIso`
+    // (pass "" for a paused timer), as HH:MM:SS.
+    function fmtElapsed(baseSecs, sinceIso) {
+        let live = sinceIso
+            ? Math.max(0, Math.floor((Date.now() - Date.parse(sinceIso)) / 1000))
+            : 0
+        let secs = Math.max(0, baseSecs) + live
         let parts = [Math.floor(secs / 3600), Math.floor(secs % 3600 / 60), secs % 60]
         return parts.map(n => n < 10 ? "0" + n : "" + n).join(":")
     }
@@ -337,7 +339,8 @@ ApplicationWindow {
     Timer {
         interval: 1000
         repeat: true
-        running: timer.runningTaskId !== ""
+        // Only tick while a segment is actually counting (not while paused).
+        running: timer.runningSince !== ""
         onTriggered: root.tick++
     }
 
@@ -356,15 +359,16 @@ ApplicationWindow {
                 anchors.fill: parent
                 spacing: 10
 
-                // Pulsing dot - stands in for a clock glyph the font lacks.
+                // Red pulsing while counting; amber and still while paused.
                 Rectangle {
                     implicitWidth: 10
                     implicitHeight: 10
                     radius: 5
-                    color: "#e74c3c"
+                    color: timer.paused ? "#e0a030" : "#e74c3c"
                     SequentialAnimation on opacity {
-                        running: timerBar.visible
+                        running: timerBar.visible && !timer.paused
                         loops: Animation.Infinite
+                        alwaysRunToEnd: true
                         NumberAnimation { to: 0.3; duration: 700 }
                         NumberAnimation { to: 1.0; duration: 700 }
                     }
@@ -376,8 +380,17 @@ ApplicationWindow {
                     font.bold: true
                 }
                 Label {
-                    text: (root.tick, root.fmtDuration(timer.runningSince))
+                    visible: timer.paused
+                    text: qsTr("paused")
+                    opacity: 0.7
+                }
+                Label {
+                    text: (root.tick, root.fmtElapsed(timer.baseSeconds, timer.runningSince))
                     font.family: "monospace"
+                }
+                Button {
+                    text: timer.paused ? qsTr("Resume") : qsTr("Pause")
+                    onClicked: timer.paused ? timer.resume() : timer.pause()
                 }
                 Button {
                     text: qsTr("Stop")
@@ -586,7 +599,9 @@ ApplicationWindow {
                     required property string deadline
                     required property bool overdue
 
-                    readonly property bool running: rowItem.id === timer.runningTaskId
+                    readonly property bool sessionTask: rowItem.id === timer.runningTaskId
+                    readonly property bool running: rowItem.sessionTask && !timer.paused
+                    readonly property bool paused: rowItem.sessionTask && timer.paused
 
                     width: list.width
                     leftPadding: 8 + depth * 18
@@ -636,11 +651,11 @@ ApplicationWindow {
                         }
 
                         Rectangle {
-                            visible: rowItem.running
+                            visible: rowItem.sessionTask
                             implicitWidth: 9
                             implicitHeight: 9
                             radius: 4.5
-                            color: "#e74c3c"
+                            color: rowItem.paused ? "#e0a030" : "#e74c3c"
                         }
 
                         Label {
@@ -651,17 +666,25 @@ ApplicationWindow {
                             opacity: rowItem.overdue ? 1 : 0.7
                         }
 
-                        // Primary row action: start / stop the timer. Always
-                        // visible and labelled - a bare icon read as a mystery
-                        // button. The play/stop mark is drawn (Canvas) because
-                        // the system font has no media glyphs.
+                        // Primary row action. Idle -> start; running -> pause;
+                        // paused -> resume. (Stop lives in the top bar and the
+                        // ⋯ menu.) The mark is drawn (Canvas) - the system font
+                        // has no media glyphs.
                         Button {
                             padding: 4
                             leftPadding: 8
                             rightPadding: 8
-                            onClicked: timer.toggle(rowItem.id)
-                            ToolTip.text: rowItem.running ? qsTr("Stop the timer")
-                                                          : qsTr("Start timing this task")
+                            onClicked: {
+                                if (rowItem.running)
+                                    timer.pause()
+                                else if (rowItem.paused)
+                                    timer.resume()
+                                else
+                                    timer.start(rowItem.id)
+                            }
+                            ToolTip.text: rowItem.running ? qsTr("Pause the timer")
+                                        : rowItem.paused ? qsTr("Resume the timer")
+                                        : qsTr("Start timing this task")
                             ToolTip.visible: hovered
 
                             contentItem: Row {
@@ -672,17 +695,20 @@ ApplicationWindow {
                                     width: 10
                                     height: 10
                                     anchors.verticalCenter: parent.verticalCenter
-                                    property bool running: rowItem.running
-                                    property color mark: rowItem.running ? "#e74c3c"
-                                                                         : palette.buttonText
-                                    onRunningChanged: requestPaint()
+                                    // Redraw when either input changes.
+                                    property bool showPause: rowItem.running
+                                    property color mark: rowItem.running ? "#e0a030"
+                                                       : rowItem.paused ? "#e0a030"
+                                                       : palette.buttonText
+                                    onShowPauseChanged: requestPaint()
                                     onMarkChanged: requestPaint()
                                     onPaint: {
                                         var ctx = getContext("2d")
                                         ctx.reset()
                                         ctx.fillStyle = mark
-                                        if (running) {
-                                            ctx.fillRect(1, 1, 8, 8)
+                                        if (showPause) {
+                                            ctx.fillRect(1, 0, 3, 10)
+                                            ctx.fillRect(6, 0, 3, 10)
                                         } else {
                                             ctx.beginPath()
                                             ctx.moveTo(1, 0)
@@ -696,7 +722,9 @@ ApplicationWindow {
 
                                 Label {
                                     anchors.verticalCenter: parent.verticalCenter
-                                    text: rowItem.running ? qsTr("Stop") : qsTr("Timer")
+                                    text: rowItem.running ? qsTr("Pause")
+                                        : rowItem.paused ? qsTr("Resume")
+                                        : qsTr("Timer")
                                     font.pointSize: 9
                                 }
                             }
@@ -745,8 +773,22 @@ ApplicationWindow {
                             onTriggered: tasks.addChild(rowItem.index, qsTr("New subtask"))
                         }
                         MenuItem {
-                            text: rowItem.running ? qsTr("Stop timer") : qsTr("Start timer")
-                            onTriggered: timer.toggle(rowItem.id)
+                            text: rowItem.running ? qsTr("Pause timer")
+                                : rowItem.paused ? qsTr("Resume timer")
+                                : qsTr("Start timer")
+                            onTriggered: {
+                                if (rowItem.running)
+                                    timer.pause()
+                                else if (rowItem.paused)
+                                    timer.resume()
+                                else
+                                    timer.start(rowItem.id)
+                            }
+                        }
+                        MenuItem {
+                            text: qsTr("Stop timer")
+                            enabled: rowItem.sessionTask
+                            onTriggered: timer.stop()
                         }
                         MenuItem {
                             text: qsTr("Time entries…")
