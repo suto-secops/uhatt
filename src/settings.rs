@@ -28,6 +28,8 @@ pub mod qobject {
         #[qproperty(bool, calendar_cross_past, cxx_name = "calendarCrossPast", READ, WRITE = set_calendar_cross_past, NOTIFY)]
         // Calendar page: hide the leading/trailing days of adjacent months.
         #[qproperty(bool, calendar_hide_other_month, cxx_name = "calendarHideOtherMonth", READ, WRITE = set_calendar_hide_other_month, NOTIFY)]
+        // Calendar page: show the per-day "TC: N" task-count badge.
+        #[qproperty(bool, calendar_show_task_count, cxx_name = "calendarShowTaskCount", READ, WRITE = set_calendar_show_task_count, NOTIFY)]
         type Settings = super::SettingsRust;
     }
 
@@ -43,6 +45,9 @@ pub mod qobject {
         #[cxx_name = "setCalendarHideOtherMonth"]
         fn set_calendar_hide_other_month(self: Pin<&mut Settings>, value: bool);
 
+        #[cxx_name = "setCalendarShowTaskCount"]
+        fn set_calendar_show_task_count(self: Pin<&mut Settings>, value: bool);
+
         /// "time left until `iso_date`" per the current setting; "" when the
         /// countdown is off or the date can't be read.
         #[qinvokable]
@@ -57,6 +62,7 @@ pub struct SettingsRust {
     deadline_countdown: i32,
     calendar_cross_past: bool,
     calendar_hide_other_month: bool,
+    calendar_show_task_count: bool,
 }
 
 impl Default for SettingsRust {
@@ -65,9 +71,11 @@ impl Default for SettingsRust {
             conn: None,
             deadline_countdown: 0,
             // Cross past days on by default; hiding adjacent-month days off
-            // (the grid shows them until the user opts out).
+            // (the grid shows them until the user opts out); task-count badge
+            // on (it is the styled version the user asked for).
             calendar_cross_past: true,
             calendar_hide_other_month: false,
+            calendar_show_task_count: true,
         }
     }
 }
@@ -76,6 +84,7 @@ impl Default for SettingsRust {
 const COUNTDOWN_KEY: &str = "deadline_countdown";
 const CROSS_PAST_KEY: &str = "calendar_cross_past";
 const HIDE_OTHER_MONTH_KEY: &str = "calendar_hide_other_month";
+const SHOW_TASK_COUNT_KEY: &str = "calendar_show_task_count";
 
 fn mode_of(value: i32) -> CountdownMode {
     match value {
@@ -104,12 +113,14 @@ impl cxx_qt::Initialize for qobject::Settings {
             .unwrap_or(0);
         let cross_past = read_bool(&conn, CROSS_PAST_KEY, true);
         let hide_other_month = read_bool(&conn, HIDE_OTHER_MONTH_KEY, false);
+        let show_task_count = read_bool(&conn, SHOW_TASK_COUNT_KEY, true);
         {
             let mut rust = self.as_mut().rust_mut();
             rust.conn = Some(conn);
             rust.deadline_countdown = countdown;
             rust.calendar_cross_past = cross_past;
             rust.calendar_hide_other_month = hide_other_month;
+            rust.calendar_show_task_count = show_task_count;
         }
     }
 }
@@ -168,6 +179,15 @@ impl qobject::Settings {
         self.as_mut().calendar_hide_other_month_changed();
     }
 
+    fn set_calendar_show_task_count(mut self: Pin<&mut Self>, value: bool) {
+        if self.calendar_show_task_count == value {
+            return;
+        }
+        self.as_mut().rust_mut().calendar_show_task_count = value;
+        persist_bool(self.db_conn(), SHOW_TASK_COUNT_KEY, value);
+        self.as_mut().calendar_show_task_count_changed();
+    }
+
     fn countdown_text(&self, iso_date: &QString) -> QString {
         let text = db::deadline_countdown(
             self.db_conn(),
@@ -190,12 +210,15 @@ mod tests {
         // Unset -> the caller's default.
         assert!(read_bool(&conn, CROSS_PAST_KEY, true));
         assert!(!read_bool(&conn, HIDE_OTHER_MONTH_KEY, false));
+        assert!(read_bool(&conn, SHOW_TASK_COUNT_KEY, true));
 
         persist_bool(&conn, CROSS_PAST_KEY, false);
         persist_bool(&conn, HIDE_OTHER_MONTH_KEY, true);
+        persist_bool(&conn, SHOW_TASK_COUNT_KEY, false);
 
         // Stored value wins over the default, both ways.
         assert!(!read_bool(&conn, CROSS_PAST_KEY, true));
         assert!(read_bool(&conn, HIDE_OTHER_MONTH_KEY, false));
+        assert!(!read_bool(&conn, SHOW_TASK_COUNT_KEY, true));
     }
 }
