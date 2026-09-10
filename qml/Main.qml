@@ -538,15 +538,48 @@ ApplicationWindow {
         onTriggered: timer.heartbeat()
     }
 
-    // App-level settings, opened from the toolbar gear.
-    Menu {
-        id: settingsMenu
-        width: 200
-        MenuItem {
-            text: qsTr("Show finished tasks")
-            checkable: true
-            checked: tasks.showDone
-            onToggled: tasks.showDone = checked
+    // App-level settings, opened from the toolbar gear. A full dialog rather
+    // than a menu so there is room to grow as more settings arrive.
+    Dialog {
+        id: settingsDialog
+        title: qsTr("Settings")
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        width: 460
+        height: 340
+        standardButtons: Dialog.Close
+
+        contentItem: ColumnLayout {
+            spacing: 16
+
+            // ---- Tasks group ----
+            Label {
+                text: qsTr("Tasks")
+                font.bold: true
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.leftMargin: 8
+                spacing: 10
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 2
+                    Label { text: qsTr("Show finished tasks") }
+                    Label {
+                        text: qsTr("Include completed tasks in the normal views.")
+                        font.pointSize: 8
+                        opacity: 0.6
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                    }
+                }
+                Switch {
+                    checked: tasks.showDone
+                    onToggled: tasks.showDone = checked
+                }
+            }
+
+            Item { Layout.fillHeight: true }
         }
     }
 
@@ -555,20 +588,78 @@ ApplicationWindow {
         anchors.margins: 12
         spacing: 8
 
-        // ---- Toolbar -------------------------------------------------
+        // ---- Top bar: running timer (left) + settings gear (right) ----
         RowLayout {
             Layout.fillWidth: true
-            Item { Layout.fillWidth: true }
+            spacing: 8
+
+            Frame {
+                id: timerBar
+                Layout.fillWidth: true
+                visible: timer.runningTaskId !== ""
+
+                RowLayout {
+                    anchors.fill: parent
+                    spacing: 10
+
+                    // Red pulsing while counting; amber and still while paused.
+                    Rectangle {
+                        implicitWidth: 10
+                        implicitHeight: 10
+                        radius: 5
+                        color: timer.paused ? "#e0a030" : "#e74c3c"
+                        SequentialAnimation on opacity {
+                            running: timerBar.visible && !timer.paused
+                            loops: Animation.Infinite
+                            alwaysRunToEnd: true
+                            NumberAnimation { to: 0.3; duration: 700 }
+                            NumberAnimation { to: 1.0; duration: 700 }
+                        }
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        elide: Text.ElideRight
+                        text: timer.runningTaskTitle
+                        font.bold: true
+                    }
+                    Label {
+                        visible: timer.paused
+                        // A crash-recovered session reads as a pause too, but say why.
+                        text: timer.recovered
+                              ? qsTr("paused — app closed while running")
+                              : qsTr("paused")
+                        opacity: 0.7
+                    }
+                    Label {
+                        text: (root.tick, root.fmtElapsed(timer.baseSeconds, timer.runningSince))
+                        font.family: "monospace"
+                    }
+                    Button {
+                        text: timer.paused ? qsTr("Resume") : qsTr("Pause")
+                        onClicked: timer.paused ? timer.resume() : timer.pause()
+                    }
+                    Button {
+                        text: qsTr("Stop")
+                        onClicked: timer.stop()
+                    }
+                }
+            }
+
+            // Holds the gear to the right when no timer is running.
+            Item {
+                Layout.fillWidth: true
+                visible: !timerBar.visible
+            }
+
             ToolButton {
                 id: settingsButton
                 focusPolicy: Qt.NoFocus
                 implicitWidth: 30
                 implicitHeight: 30
+                Layout.alignment: Qt.AlignVCenter
                 ToolTip.text: qsTr("Settings")
                 ToolTip.visible: hovered
-                onClicked: settingsMenu.popup(settingsButton,
-                                              settingsButton.width - settingsMenu.width,
-                                              settingsButton.height)
+                onClicked: settingsDialog.open()
                 contentItem: Canvas {
                     property color ink: palette.buttonText
                     onInkChanged: requestPaint()
@@ -595,59 +686,6 @@ ApplicationWindow {
             }
         }
 
-        // ---- Running-timer bar ----------------------------------------
-        Frame {
-            id: timerBar
-            Layout.fillWidth: true
-            visible: timer.runningTaskId !== ""
-
-            RowLayout {
-                anchors.fill: parent
-                spacing: 10
-
-                // Red pulsing while counting; amber and still while paused.
-                Rectangle {
-                    implicitWidth: 10
-                    implicitHeight: 10
-                    radius: 5
-                    color: timer.paused ? "#e0a030" : "#e74c3c"
-                    SequentialAnimation on opacity {
-                        running: timerBar.visible && !timer.paused
-                        loops: Animation.Infinite
-                        alwaysRunToEnd: true
-                        NumberAnimation { to: 0.3; duration: 700 }
-                        NumberAnimation { to: 1.0; duration: 700 }
-                    }
-                }
-                Label {
-                    Layout.fillWidth: true
-                    elide: Text.ElideRight
-                    text: timer.runningTaskTitle
-                    font.bold: true
-                }
-                Label {
-                    visible: timer.paused
-                    // A crash-recovered session reads as a pause too, but say why.
-                    text: timer.recovered
-                          ? qsTr("paused — app closed while running")
-                          : qsTr("paused")
-                    opacity: 0.7
-                }
-                Label {
-                    text: (root.tick, root.fmtElapsed(timer.baseSeconds, timer.runningSince))
-                    font.family: "monospace"
-                }
-                Button {
-                    text: timer.paused ? qsTr("Resume") : qsTr("Pause")
-                    onClicked: timer.paused ? timer.resume() : timer.pause()
-                }
-                Button {
-                    text: qsTr("Stop")
-                    onClicked: timer.stop()
-                }
-            }
-        }
-
         RowLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -658,6 +696,11 @@ ApplicationWindow {
             Layout.preferredWidth: 190
             Layout.fillHeight: true
             spacing: 4
+
+            Label {
+                text: qsTr("Views")
+                font.bold: true
+            }
 
             // Built-in views: every task, the ones with no project, the archive.
             Repeater {
