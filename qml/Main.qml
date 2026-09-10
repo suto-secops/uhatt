@@ -63,6 +63,34 @@ ApplicationWindow {
         id: settings
     }
 
+    // Floating chip shown under the cursor while a task is being dragged onto
+    // another to re-parent it. Lives at the window level so it isn't clipped by
+    // the task list.
+    Control {
+        id: dragProxy
+        parent: Overlay.overlay
+        z: 9999
+        visible: Drag.active
+        property int sourceRow: -1
+        property string label: ""
+
+        Drag.active: false
+        Drag.hotSpot.x: 12
+        Drag.hotSpot.y: height / 2
+
+        padding: 6
+        background: Rectangle {
+            color: palette.highlight
+            radius: 4
+            opacity: 0.92
+        }
+        contentItem: Label {
+            text: dragProxy.label
+            color: palette.highlightedText
+            font.pointSize: 9
+        }
+    }
+
     Dialog {
         id: graphDialog
 
@@ -1397,6 +1425,54 @@ ApplicationWindow {
                     TapHandler {
                         acceptedButtons: Qt.RightButton
                         onTapped: rowMenu.popup()
+                    }
+
+                    // ---- Drag to re-parent ----
+                    property bool dropHover: false
+
+                    // Press and drag the row onto another task to make it (and
+                    // its subtree) a child of that task.
+                    DragHandler {
+                        id: rowDrag
+                        target: dragProxy
+                        enabled: !tasks.selectionMode && !rowItem.editing
+                        onActiveChanged: {
+                            if (active) {
+                                dragProxy.sourceRow = rowItem.index
+                                dragProxy.label = rowItem.title
+                                dragProxy.x = centroid.scenePosition.x - dragProxy.Drag.hotSpot.x
+                                dragProxy.y = centroid.scenePosition.y - dragProxy.Drag.hotSpot.y
+                                dragProxy.Drag.active = true
+                            } else {
+                                dragProxy.Drag.drop()
+                                dragProxy.Drag.active = false
+                            }
+                        }
+                    }
+
+                    // Drop target: the whole row.
+                    DropArea {
+                        anchors.fill: parent
+                        onEntered: (drag) => {
+                            rowItem.dropHover =
+                                tasks.canReparent(drag.source.sourceRow, rowItem.id)
+                        }
+                        onExited: rowItem.dropHover = false
+                        onDropped: (drop) => {
+                            if (tasks.canReparent(drop.source.sourceRow, rowItem.id))
+                                tasks.reparent(drop.source.sourceRow, rowItem.id)
+                            rowItem.dropHover = false
+                        }
+                    }
+
+                    // Valid drop target outline.
+                    Rectangle {
+                        anchors.fill: parent
+                        visible: rowItem.dropHover
+                        color: "transparent"
+                        border.color: palette.highlight
+                        border.width: 2
+                        radius: 3
                     }
 
                     Menu {

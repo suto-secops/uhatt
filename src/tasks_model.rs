@@ -141,6 +141,17 @@ pub mod qobject {
         #[cxx_name = "moveToProject"]
         fn move_to_project(self: Pin<&mut TaskListModel>, row: i32, project_id: &QString);
 
+        /// Re-parent the task at `row` (and its subtree) under `target_id`.
+        /// No-op if the move would create a cycle.
+        #[qinvokable]
+        fn reparent(self: Pin<&mut TaskListModel>, row: i32, target_id: &QString);
+
+        /// Whether [`reparent`] with these arguments would do anything - used to
+        /// light up a valid drop target while dragging.
+        #[qinvokable]
+        #[cxx_name = "canReparent"]
+        fn can_reparent(self: &TaskListModel, row: i32, target_id: &QString) -> bool;
+
         /// Add a subtask under the task at `row`, expanding it. No-op on blank input.
         #[qinvokable]
         #[cxx_name = "addChild"]
@@ -534,6 +545,29 @@ impl qobject::TaskListModel {
             return;
         }
         self.reload();
+    }
+
+    fn reparent(self: Pin<&mut Self>, row: i32, target_id: &QString) {
+        let Some(task_id) = self.id_at(row) else {
+            return;
+        };
+        let target = target_id.to_string();
+        if target.is_empty() {
+            return;
+        }
+        if let Err(e) = db::reparent_task(self.db_conn(), &task_id, &target) {
+            eprintln!("uhatt: reparent failed: {e}");
+            return;
+        }
+        self.reload();
+    }
+
+    fn can_reparent(&self, row: i32, target_id: &QString) -> bool {
+        let Some(task_id) = self.id_at(row) else {
+            return false;
+        };
+        let target = target_id.to_string();
+        !target.is_empty() && db::can_reparent(self.db_conn(), &task_id, &target).unwrap_or(false)
     }
 
     fn remove(self: Pin<&mut Self>, row: i32) {
