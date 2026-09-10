@@ -65,6 +65,9 @@ pub mod qobject {
         Notes,
         /// Whether the row is ticked in multi-select mode.
         Selected,
+        /// One char per indent column, "1" where a tree guide line runs
+        /// full-height, "0" where it stops at this row's connector.
+        BranchMask,
     }
 
     extern "RustQt" {
@@ -660,6 +663,14 @@ impl qobject::TaskListModel {
             qobject::TaskRole::Overdue => QVariant::from(&node.overdue),
             qobject::TaskRole::Notes => QVariant::from(&QString::from(task.notes.as_str())),
             qobject::TaskRole::Selected => QVariant::from(&self.selected.contains(&task.id)),
+            qobject::TaskRole::BranchMask => {
+                let mask: String = node
+                    .branch_more
+                    .iter()
+                    .map(|&more| if more { '1' } else { '0' })
+                    .collect();
+                QVariant::from(&QString::from(mask.as_str()))
+            }
             _ => QVariant::default(),
         }
     }
@@ -687,6 +698,10 @@ impl qobject::TaskListModel {
         roles.insert(
             qobject::TaskRole::Selected.repr,
             QByteArray::from("selected"),
+        );
+        roles.insert(
+            qobject::TaskRole::BranchMask.repr,
+            QByteArray::from("branchMask"),
         );
         roles
     }
