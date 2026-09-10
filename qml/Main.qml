@@ -606,7 +606,7 @@ ApplicationWindow {
         modal: true
         anchors.centerIn: Overlay.overlay
         width: 500
-        height: 560
+        height: 640
         padding: 18
         standardButtons: Dialog.Close
 
@@ -748,6 +748,27 @@ ApplicationWindow {
                     Switch {
                         checked: settings.calendarHideOtherMonth
                         onToggled: settings.calendarHideOtherMonth = checked
+                    }
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 8
+                    spacing: 10
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 2
+                        Label { text: qsTr("Show the task-count badge") }
+                        Label {
+                            Layout.fillWidth: true
+                            text: qsTr("The “TC: N” tag on each day showing how many deadlines fall on it.")
+                            font.pointSize: 8
+                            opacity: 0.6
+                            wrapMode: Text.WordWrap
+                        }
+                    }
+                    Switch {
+                        checked: settings.calendarShowTaskCount
+                        onToggled: settings.calendarShowTaskCount = checked
                     }
                 }
             }
@@ -1980,6 +2001,10 @@ ApplicationWindow {
                         delegate: Label {
                             required property string modelData
                             Layout.fillWidth: true
+                            // Equal columns: ignore the text's own width so a
+                            // long weekday name can't widen its column.
+                            Layout.preferredWidth: 0
+                            Layout.minimumWidth: 0
                             horizontalAlignment: Text.AlignHCenter
                             text: modelData
                             font.pointSize: 8
@@ -2017,6 +2042,11 @@ ApplicationWindow {
                                 cell.dayItems.some(function (it) { return it.overdue })
 
                             Layout.fillWidth: true
+                            // Every cell the same width: the GridLayout must
+                            // not grow a column to fit a long task title
+                            // (that skewed the cells and threw off the X).
+                            Layout.preferredWidth: 0
+                            Layout.minimumWidth: 0
                             Layout.preferredHeight: 92
                             padding: 4
                             enabled: !cell.blank
@@ -2037,11 +2067,28 @@ ApplicationWindow {
                                         opacity: cell.inMonth ? 1 : 0.35
                                     }
                                     Item { Layout.fillWidth: true }
-                                    Label {
-                                        visible: cell.dayItems.length > 0
-                                        text: cell.dayItems.length
-                                        font.pointSize: 8
-                                        opacity: 0.6
+                                    // Task-count badge: bordered pill, "TC:"
+                                    // prefix, so it can't be read as a date.
+                                    Rectangle {
+                                        visible: settings.calendarShowTaskCount
+                                                 && cell.dayItems.length > 0
+                                        radius: 3
+                                        color: Qt.rgba(palette.highlight.r,
+                                                       palette.highlight.g,
+                                                       palette.highlight.b, 0.15)
+                                        border.width: 1
+                                        border.color: Qt.rgba(palette.highlight.r,
+                                                              palette.highlight.g,
+                                                              palette.highlight.b, 0.55)
+                                        implicitWidth: tcLabel.implicitWidth + 8
+                                        implicitHeight: tcLabel.implicitHeight + 3
+                                        Label {
+                                            id: tcLabel
+                                            anchors.centerIn: parent
+                                            text: qsTr("TC: %1").arg(cell.dayItems.length)
+                                            font.pointSize: 7
+                                            font.bold: true
+                                        }
                                     }
                                 }
                                 // Up to three deadline chips, then "+N".
@@ -2067,11 +2114,14 @@ ApplicationWindow {
                                 Item { Layout.fillHeight: true }
                             }
 
-                            // Strike-through for past days. Blue normally; a
-                            // faint red when the day holds overdue tasks, so
-                            // their titles stay readable underneath.
+                            // Strike-through for past days: an X from corner
+                            // to corner. Blue normally; a faint red when the
+                            // day holds overdue tasks so their titles stay
+                            // readable underneath. `clip` keeps it inside the
+                            // cell even if a line is a sub-pixel long.
                             Item {
                                 anchors.fill: parent
+                                clip: true
                                 visible: settings.calendarCrossPast
                                          && cell.past && !cell.blank
                                 z: 2
@@ -2081,13 +2131,18 @@ ApplicationWindow {
                                     : palette.highlight
                                 readonly property real diag:
                                     Math.hypot(width, height)
+                                // Angle of the cell's own diagonal, so a line
+                                // of length `diag` spans exactly corner to
+                                // corner regardless of the cell's aspect.
+                                readonly property real ang:
+                                    Math.atan2(height, width) * 180 / Math.PI
 
                                 Rectangle {
                                     anchors.centerIn: parent
                                     width: parent.diag
                                     height: 2
                                     color: parent.mark
-                                    rotation: 45
+                                    rotation: parent.ang
                                     antialiasing: true
                                 }
                                 Rectangle {
@@ -2095,7 +2150,7 @@ ApplicationWindow {
                                     width: parent.diag
                                     height: 2
                                     color: parent.mark
-                                    rotation: -45
+                                    rotation: -parent.ang
                                     antialiasing: true
                                 }
                             }
