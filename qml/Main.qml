@@ -548,12 +548,13 @@ ApplicationWindow {
         title: qsTr("Settings")
         modal: true
         anchors.centerIn: Overlay.overlay
-        width: 480
-        height: 400
+        width: 500
+        height: 420
+        padding: 18
         standardButtons: Dialog.Close
 
         contentItem: ColumnLayout {
-            spacing: 16
+            spacing: 18
 
             // ---- Tasks group ----
             Label {
@@ -569,11 +570,11 @@ ApplicationWindow {
                     spacing: 2
                     Label { text: qsTr("Show finished tasks") }
                     Label {
+                        Layout.fillWidth: true
                         text: qsTr("Include completed tasks in the normal views.")
                         font.pointSize: 8
                         opacity: 0.6
                         wrapMode: Text.WordWrap
-                        Layout.fillWidth: true
                     }
                 }
                 Switch {
@@ -583,26 +584,23 @@ ApplicationWindow {
             }
 
             // ---- Deadlines group ----
-            Label {
-                text: qsTr("Deadlines")
-                font.bold: true
-                Layout.topMargin: 4
-            }
             ColumnLayout {
                 Layout.fillWidth: true
-                Layout.leftMargin: 8
                 spacing: 2
 
                 Label {
-                    text: qsTr("Show time left next to a deadline")
-                    Layout.fillWidth: true
+                    text: qsTr("Deadlines")
+                    font.bold: true
                 }
                 Label {
-                    text: qsTr("How the remaining time is worded.")
-                    font.pointSize: 8
-                    opacity: 0.6
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 8
+                    text: qsTr("Show time left next to a deadline, worded as:")
+                    wrapMode: Text.WordWrap
                 }
-                RowLayout {
+                Flow {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 8
                     Layout.topMargin: 4
                     spacing: 6
                     Repeater {
@@ -624,9 +622,12 @@ ApplicationWindow {
                     }
                 }
                 Label {
-                    Layout.topMargin: 2
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 8
+                    Layout.topMargin: 4
                     font.pointSize: 8
                     opacity: 0.6
+                    wrapMode: Text.WordWrap
                     // Live preview against a date ~5 weeks out. The mode is
                     // named in the binding so it re-runs on change.
                     text: {
@@ -1025,6 +1026,10 @@ ApplicationWindow {
                     width: list.width
                     leftPadding: 8
                     opacity: done ? 0.5 : 1.0
+                    // Don't take keyboard focus: when a button inside the info
+                    // panel is destroyed on a model reset, focus would otherwise
+                    // jump to a neighbouring row and draw a stray highlight.
+                    focusPolicy: Qt.NoFocus
 
                     onClicked: {
                         if (tasks.selectionMode) {
@@ -1053,6 +1058,8 @@ ApplicationWindow {
                         // ancestor level; `branchMask` says which run full
                         // height (branch continues) vs. stop at the connector
                         // (last child). The deepest column also gets the elbow.
+                        // Rectangles overshoot the row vertically so the lines
+                        // stay continuous across the gap between rows.
                         Item {
                             visible: rowItem.depth > 0
                             Layout.preferredWidth: rowItem.depth * 18
@@ -1074,12 +1081,10 @@ ApplicationWindow {
                                         width: 1
                                         color: palette.text
                                         opacity: 0.22
-                                        // Overshoot top/bottom by the inter-row
-                                        // gap so adjacent rows' lines join up.
-                                        y: -4
+                                        y: -14
                                         height: parent.lastCol
-                                                ? (parent.pipe ? parent.height + 8 : parent.height / 2 + 4)
-                                                : (parent.pipe ? parent.height + 8 : 0)
+                                                ? (parent.pipe ? parent.height + 28 : parent.height / 2 + 14)
+                                                : (parent.pipe ? parent.height + 28 : 0)
                                     }
                                     Rectangle {
                                         visible: parent.lastCol
@@ -1094,34 +1099,23 @@ ApplicationWindow {
                             }
                         }
 
-                        // Multi-select tick (leading), only while picking.
-                        CheckBox {
-                            visible: tasks.selectionMode
-                            padding: 0
-                            checked: rowItem.selected
-                            onToggled: tasks.toggleSelected(rowItem.index)
-                        }
-
-                        // Expand/collapse control. A plain Label + TapHandler rather than
-                        // a Button: Button styles add unpredictable padding that clipped
-                        // the single-glyph label to nothing on the Basic style. ASCII
-                        // "[+]" / "[-]" because the system font has no box-drawing glyphs.
+                        // Expand/collapse control. A plain Label + MouseArea
+                        // (which consumes the click, so the row's own click -
+                        // open the info panel - does not also fire). ASCII
+                        // "[+]" / "[-]" - the system font has no arrow glyphs.
                         Label {
                             Layout.preferredWidth: 26
                             horizontalAlignment: Text.AlignHCenter
                             text: rowItem.hasChildren ? (rowItem.expanded ? "[-]" : "[+]") : ""
-                            color: disclosureHover.hovered ? palette.highlight : palette.text
+                            color: disclosureArea.containsMouse ? palette.highlight : palette.text
                             font.pointSize: 11
 
-                            HoverHandler {
-                                id: disclosureHover
-                            }
-                            TapHandler {
-                                enabled: rowItem.hasChildren
-                                // Exclusive grab so the row's own click (open
-                                // info panel) doesn't also fire.
-                                gesturePolicy: TapHandler.ReleaseWithinBounds
-                                onTapped: tasks.toggleExpanded(rowItem.index)
+                            MouseArea {
+                                id: disclosureArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                enabled: rowItem.hasChildren && !tasks.selectionMode
+                                onClicked: tasks.toggleExpanded(rowItem.index)
                             }
                         }
 
@@ -1294,6 +1288,16 @@ ApplicationWindow {
                                 }
                             }
                         }
+
+                        // Multi-select tick - at the row's end, clear of the
+                        // "mark done" box on the left.
+                        CheckBox {
+                            visible: tasks.selectionMode
+                            padding: 0
+                            Layout.leftMargin: 4
+                            checked: rowItem.selected
+                            onToggled: tasks.toggleSelected(rowItem.index)
+                        }
                     }
 
                     // ---- Info panel: description, deadline, time invested ----
@@ -1352,12 +1356,14 @@ ApplicationWindow {
                                     text: qsTr("Set…")
                                     font.pointSize: 8
                                     padding: 3
+                                    focusPolicy: Qt.NoFocus
                                     onClicked: datePopup.open()
                                 }
                                 Button {
                                     text: qsTr("Clear")
                                     font.pointSize: 8
                                     padding: 3
+                                    focusPolicy: Qt.NoFocus
                                     enabled: rowItem.deadline !== ""
                                     onClicked: tasks.setDeadline(rowItem.index, "")
                                 }
