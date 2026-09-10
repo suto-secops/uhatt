@@ -72,26 +72,6 @@ ApplicationWindow {
     // page is opened so deadline edits made on the task list show up.
     onMainViewChanged: if (mainView === "calendar") calendar.reload()
 
-    // Shared SplitView divider: a wider hit area with the same grey line the
-    // sidebar's horizontal separators use, tinted on hover / drag.
-    Component {
-        id: splitHandle
-        Rectangle {
-            implicitWidth: 8
-            color: SplitHandle.pressed
-                   ? Qt.rgba(palette.highlight.r, palette.highlight.g,
-                             palette.highlight.b, 0.5)
-                   : SplitHandle.hovered
-                   ? Qt.rgba(palette.highlight.r, palette.highlight.g,
-                             palette.highlight.b, 0.22)
-                   : "transparent"
-            ToolSeparator {
-                anchors.centerIn: parent
-                height: parent.height
-            }
-        }
-    }
-
     // Floating chip shown under the cursor while a task is being dragged onto
     // another to re-parent it. Lives at the window level so it isn't clipped by
     // the task list.
@@ -885,7 +865,6 @@ ApplicationWindow {
             Layout.fillWidth: true
             Layout.fillHeight: true
             orientation: Qt.Horizontal
-            handle: splitHandle
 
         // ---- Sidebar -----------------------------------------------------
         ColumnLayout {
@@ -1981,7 +1960,6 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 orientation: Qt.Horizontal
-                handle: splitHandle
 
                 // Month grid, held to the top so the cells stay compact.
                 ColumnLayout {
