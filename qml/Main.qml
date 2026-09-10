@@ -365,7 +365,11 @@ ApplicationWindow {
             RowLayout {
                 Layout.fillWidth: true
                 Label {
-                    text: qsTr("Total: %1").arg(entries.totalText)
+                    // For a parent task, its own entries and the subtree rollup.
+                    text: entries.hasSubtasks
+                          ? qsTr("This task: %1  ·  incl. subtasks: %2")
+                              .arg(entries.totalText).arg(entries.subtreeTotalText)
+                          : qsTr("Total: %1").arg(entries.totalText)
                     font.bold: true
                 }
                 Item { Layout.fillWidth: true }
@@ -788,6 +792,16 @@ ApplicationWindow {
             Layout.fillWidth: true
             Layout.fillHeight: true
             spacing: 8
+
+            // Time recorded across everything in the current view (a project,
+            // "All tasks", or the project-less ones).
+            Label {
+                Layout.fillWidth: true
+                visible: tasks.projectFilter !== "finished" && tasks.viewTotalText !== ""
+                text: qsTr("Time invested: %1").arg(tasks.viewTotalText)
+                font.pointSize: 9
+                opacity: 0.7
+            }
 
             RowLayout {
                 Layout.fillWidth: true

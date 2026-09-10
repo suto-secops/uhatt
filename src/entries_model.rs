@@ -44,8 +44,13 @@ pub mod qobject {
         #[qml_element]
         #[base = QAbstractListModel]
         #[qproperty(QString, task_id, cxx_name = "taskId", READ, WRITE = set_task_id, NOTIFY)]
-        // Sum of all listed entries' durations, e.g. "3h 20m". Driven by the model.
+        // Sum of this task's own entries, e.g. "3h 20m". Driven by the model.
         #[qproperty(QString, total_text, cxx_name = "totalText")]
+        // Sum including every subtask's entries. Only meaningful when
+        // `hasSubtasks`; equals `totalText` otherwise. Driven by the model.
+        #[qproperty(QString, subtree_total_text, cxx_name = "subtreeTotalText")]
+        // Whether the task has subtasks (so the rolled-up total is worth showing).
+        #[qproperty(bool, has_subtasks, cxx_name = "hasSubtasks")]
         type EntriesModel = super::EntriesModelRust;
     }
 
@@ -106,6 +111,8 @@ pub struct EntriesModelRust {
     conn: Option<Connection>,
     task_id: QString,
     total_text: QString,
+    subtree_total_text: QString,
+    has_subtasks: bool,
     cache: Vec<EntryRow>,
 }
 
@@ -127,6 +134,9 @@ fn human_duration(secs: i64) -> String {
 fn human_total(secs: i64) -> String {
     if secs <= 0 {
         return "0m".to_owned();
+    }
+    if secs < 60 {
+        return format!("{secs}s");
     }
     let (h, m) = (secs / 3600, (secs % 3600) / 60);
     if h == 0 {
@@ -164,6 +174,14 @@ impl qobject::EntriesModel {
             db::list_entries_for_task(self.db_conn(), &task_id).unwrap_or_default()
         };
         let total: i64 = entries.iter().map(|r| r.seconds).sum();
+        let (subtree_total, has_subtasks) = if task_id.is_empty() {
+            (total, false)
+        } else {
+            (
+                db::task_seconds(self.db_conn(), &task_id, true).unwrap_or(total),
+                db::has_subtasks(self.db_conn(), &task_id).unwrap_or(false),
+            )
+        };
         // SAFETY: begin/end are paired around the cache swap.
         unsafe {
             self.as_mut().begin_reset_model();
@@ -172,6 +190,9 @@ impl qobject::EntriesModel {
         }
         self.as_mut()
             .set_total_text(QString::from(human_total(total).as_str()));
+        self.as_mut()
+            .set_subtree_total_text(QString::from(human_total(subtree_total).as_str()));
+        self.as_mut().set_has_subtasks(has_subtasks);
     }
 
     fn set_task_id(mut self: Pin<&mut Self>, value: QString) {

@@ -73,6 +73,9 @@ pub mod qobject {
         // When true, completed tasks also show in the "", "unfiled" and project
         // views. The "finished" view is unaffected (it is always only done).
         #[qproperty(bool, show_done, cxx_name = "showDone", READ, WRITE = set_show_done, NOTIFY)]
+        // Time recorded across every task in the current view's scope, e.g.
+        // "18h 40m" ("" while on the finished list). Driven by the model.
+        #[qproperty(QString, view_total_text, cxx_name = "viewTotalText")]
         type TaskListModel = super::TaskListModelRust;
     }
 
@@ -168,6 +171,8 @@ pub struct TaskListModelRust {
     project_filter: QString,
     /// Backs the `showDone` Q_PROPERTY.
     show_done: bool,
+    /// Backs the `viewTotalText` Q_PROPERTY.
+    view_total_text: QString,
     tree: Vec<TaskNode>,
     collapsed: HashSet<String>,
     /// Indices into `tree` that are currently visible, in display order.
@@ -176,6 +181,19 @@ pub struct TaskListModelRust {
 
 /// The special `projectFilter` value that selects the completed-tasks list.
 const FINISHED: &str = "finished";
+
+/// Seconds as `"0m"` / `"45m"` / `"6h 20m"`, for the view total line.
+fn human_hm(secs: i64) -> String {
+    if secs <= 0 {
+        return "0m".to_owned();
+    }
+    let (h, m) = (secs / 3600, (secs % 3600) / 60);
+    if h == 0 {
+        format!("{m}m")
+    } else {
+        format!("{h}h {m:02}m")
+    }
+}
 
 /// Interpret a non-`finished` `projectFilter` string as a project scope.
 fn parse_filter(s: &str) -> ProjectFilter {
@@ -217,10 +235,15 @@ impl cxx_qt::Initialize for qobject::TaskListModel {
         };
         let tree = db::list_task_tree(&conn, &ProjectFilter::All, false).unwrap_or_default();
         let visible = compute_visible(&tree, &HashSet::new());
-        let mut rust = self.as_mut().rust_mut();
-        rust.conn = Some(conn);
-        rust.tree = tree;
-        rust.visible = visible;
+        let total = db::scope_seconds(&conn, &ProjectFilter::All).unwrap_or(0);
+        {
+            let mut rust = self.as_mut().rust_mut();
+            rust.conn = Some(conn);
+            rust.tree = tree;
+            rust.visible = visible;
+        }
+        self.as_mut()
+            .set_view_total_text(QString::from(human_hm(total).as_str()));
     }
 }
 
@@ -251,6 +274,14 @@ impl qobject::TaskListModel {
             db::list_task_tree(self.db_conn(), &parse_filter(&filter_str), self.show_done)
         }
         .unwrap_or_default();
+        // Time total for the current scope (blank on the finished list).
+        let view_total = if filter_str == FINISHED {
+            String::new()
+        } else {
+            let secs = db::scope_seconds(self.db_conn(), &parse_filter(&filter_str)).unwrap_or(0);
+            human_hm(secs)
+        };
+
         let live: HashSet<&str> = tree.iter().map(|n| n.task.id.as_str()).collect();
         let collapsed: HashSet<String> = self
             .collapsed
@@ -270,6 +301,8 @@ impl qobject::TaskListModel {
             }
             self.as_mut().end_reset_model();
         }
+        self.as_mut()
+            .set_view_total_text(QString::from(view_total.as_str()));
     }
 
     fn set_project_filter(mut self: Pin<&mut Self>, value: QString) {

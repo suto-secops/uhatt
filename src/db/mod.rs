@@ -685,6 +685,64 @@ pub fn delete_entry(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
+// --- Time-invested totals ------------------------------------------------
+
+/// SQL summing a set of `time_entries` rows to whole seconds (open rows count 0).
+const SUM_SECONDS: &str = "COALESCE(SUM(CASE WHEN end_ts IS NULL THEN 0
+                       ELSE strftime('%s', end_ts) - strftime('%s', start_ts) END), 0)";
+
+/// Seconds recorded against `task_id`: just its own entries, or - with
+/// `include_subtree` - its own plus every descendant task's.
+pub fn task_seconds(
+    conn: &Connection,
+    task_id: &str,
+    include_subtree: bool,
+) -> rusqlite::Result<i64> {
+    let sql = if include_subtree {
+        format!(
+            "WITH RECURSIVE subtree(id) AS (
+                 SELECT ?1
+               UNION ALL
+                 SELECT t.id FROM tasks t JOIN subtree s ON t.parent_task_id = s.id
+             )
+             SELECT {SUM_SECONDS} FROM time_entries
+             WHERE task_id IN (SELECT id FROM subtree)"
+        )
+    } else {
+        format!("SELECT {SUM_SECONDS} FROM time_entries WHERE task_id = ?1")
+    };
+    conn.query_row(&sql, params![task_id], |r| r.get(0))
+}
+
+/// Whether `task_id` has at least one direct subtask.
+pub fn has_subtasks(conn: &Connection, task_id: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tasks WHERE parent_task_id = ?1)",
+        params![task_id],
+        |r| r.get::<_, i64>(0).map(|n| n != 0),
+    )
+}
+
+/// Seconds recorded across every task in `filter`'s scope (all tasks, the
+/// project-less ones, or one project). Subtasks inherit their parent's project,
+/// so a project scope already covers whole subtrees.
+pub fn scope_seconds(conn: &Connection, filter: &ProjectFilter) -> rusqlite::Result<i64> {
+    let (predicate, bind): (&str, Option<&str>) = match filter {
+        ProjectFilter::All => ("1", None),
+        ProjectFilter::Unfiled => ("t.project_id IS NULL", None),
+        ProjectFilter::Only(id) => ("t.project_id = ?1", Some(id.as_str())),
+    };
+    let sql = format!(
+        "SELECT {SUM_SECONDS}
+         FROM time_entries e JOIN tasks t ON t.id = e.task_id
+         WHERE {predicate}"
+    );
+    match bind {
+        Some(id) => conn.query_row(&sql, params![id], |r| r.get(0)),
+        None => conn.query_row(&sql, [], |r| r.get(0)),
+    }
+}
+
 // --- Time-invested heatmap ------------------------------------------------
 
 /// What the graph is summing over.
@@ -1351,6 +1409,53 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert!(rows[0].entry.end_ts.is_none());
         assert_eq!(rows[0].seconds, 0);
+    }
+
+    #[test]
+    fn time_totals_roll_up_over_subtree_and_scope() {
+        let conn = open_in_memory().unwrap();
+        let proj = create_project(&conn, "P").unwrap();
+        let parent = create_task(&conn, "parent", None, Some(&proj.id)).unwrap();
+        let kid = create_task(&conn, "kid", Some(&parent.id), None).unwrap();
+        let grandkid = create_task(&conn, "grandkid", Some(&kid.id), None).unwrap();
+        let loner = root(&conn, "loner"); // no project
+
+        let entry = |task: &str, start: &str, end: &str| {
+            conn.execute(
+                "INSERT INTO time_entries (id, task_id, start_ts, end_ts, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?3)",
+                params![new_id(), task, start, end],
+            )
+            .unwrap();
+        };
+        entry(&parent.id, "2026-03-01T09:00:00", "2026-03-01T10:00:00"); // 1h
+        entry(&kid.id, "2026-03-02T09:00:00", "2026-03-02T09:30:00"); // 30m
+        entry(&grandkid.id, "2026-03-03T09:00:00", "2026-03-03T11:00:00"); // 2h
+        entry(&loner.id, "2026-03-04T09:00:00", "2026-03-04T09:15:00"); // 15m
+        start_timer(&conn, &parent.id).unwrap(); // running: counts 0
+
+        // Own vs whole subtree.
+        assert_eq!(task_seconds(&conn, &parent.id, false).unwrap(), 3600);
+        assert_eq!(
+            task_seconds(&conn, &parent.id, true).unwrap(),
+            3600 + 1800 + 7200
+        );
+        assert_eq!(task_seconds(&conn, &kid.id, true).unwrap(), 1800 + 7200);
+        assert_eq!(task_seconds(&conn, &grandkid.id, true).unwrap(), 7200);
+
+        assert!(has_subtasks(&conn, &parent.id).unwrap());
+        assert!(!has_subtasks(&conn, &grandkid.id).unwrap());
+
+        // Scope totals.
+        assert_eq!(
+            scope_seconds(&conn, &ProjectFilter::Only(proj.id.clone())).unwrap(),
+            3600 + 1800 + 7200
+        );
+        assert_eq!(scope_seconds(&conn, &ProjectFilter::Unfiled).unwrap(), 900);
+        assert_eq!(
+            scope_seconds(&conn, &ProjectFilter::All).unwrap(),
+            3600 + 1800 + 7200 + 900
+        );
     }
 
     fn day_secs(cells: &[HeatCell], date: &str) -> i64 {
