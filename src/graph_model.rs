@@ -1,9 +1,10 @@
 //! `GraphModel` - the calendar heatmap of time invested.
 //!
-//! Configure `targetKind` + `targetId` + `year`; the model then exposes exactly
-//! 371 rows (53 weeks x 7 days, Mon..Sun), one per day-cell, ordered so row `i`
-//! sits at grid column `i / 7`, weekday `i % 7`. `maxSeconds` lets QML scale
-//! cell colour without walking the rows itself.
+//! Configure `targetKind` + `targetId`, pick a `range` (0 = week, 1 = month,
+//! 2 = year) and page through periods with `step()` / the `anchor`. The model
+//! then exposes one row per day-cell of the Monday-aligned grid spanning that
+//! period, ordered by date. `maxSeconds` lets QML scale cell colour and
+//! `atLatest` tells it whether paging forward is possible.
 
 use core::pin::Pin;
 
@@ -11,7 +12,7 @@ use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant};
 use rusqlite::Connection;
 
-use crate::db::{self, HeatCell, SeriesTarget};
+use crate::db::{self, HeatCell, HeatRange, SeriesTarget};
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -39,8 +40,8 @@ pub mod qobject {
         Seconds,
         /// Human total, e.g. "2h 05m" / "40m" / "12s" / "0m".
         HoursText,
-        /// False for pad days borrowed from the neighbouring years.
-        InYear,
+        /// False for pad days borrowed from the neighbouring periods.
+        InPeriod,
     }
 
     extern "RustQt" {
@@ -50,11 +51,15 @@ pub mod qobject {
         // 0 = all tasks, 1 = project, 2 = task subtree.
         #[qproperty(i32, target_kind, cxx_name = "targetKind", READ, WRITE = set_target_kind, NOTIFY)]
         #[qproperty(QString, target_id, cxx_name = "targetId", READ, WRITE = set_target_id, NOTIFY)]
-        // Calendar year the grid covers.
-        #[qproperty(i32, year, READ, WRITE = set_year, NOTIFY)]
-        // Largest single-day total, for colour scaling. Driven by the model.
+        // 0 = week, 1 = month, 2 = year.
+        #[qproperty(i32, range, READ, WRITE = set_range, NOTIFY)]
+        // First day (ISO) of the period on show; always snapped to the range.
+        #[qproperty(QString, anchor, READ, WRITE = set_anchor, NOTIFY)]
+        // True when the period contains today or is in the future. Model-driven.
+        #[qproperty(bool, at_latest, cxx_name = "atLatest")]
+        // Largest single-day total, for colour scaling. Model-driven.
         #[qproperty(f64, max_seconds, cxx_name = "maxSeconds")]
-        // Sum across the whole year (pad days excluded). Driven by the model.
+        // Sum across the period (pad days excluded). Model-driven.
         #[qproperty(QString, total_text, cxx_name = "totalText")]
         type GraphModel = super::GraphModelRust;
     }
@@ -66,8 +71,14 @@ pub mod qobject {
         fn set_target_kind(self: Pin<&mut GraphModel>, value: i32);
         #[cxx_name = "setTargetId"]
         fn set_target_id(self: Pin<&mut GraphModel>, value: QString);
-        #[cxx_name = "setYear"]
-        fn set_year(self: Pin<&mut GraphModel>, value: i32);
+        #[cxx_name = "setRange"]
+        fn set_range(self: Pin<&mut GraphModel>, value: i32);
+        #[cxx_name = "setAnchor"]
+        fn set_anchor(self: Pin<&mut GraphModel>, value: QString);
+
+        /// Page by `direction` whole periods (negative = back).
+        #[qinvokable]
+        fn step(self: Pin<&mut GraphModel>, direction: i32);
     }
 
     extern "RustQt" {
@@ -107,7 +118,9 @@ pub struct GraphModelRust {
     conn: Option<Connection>,
     target_kind: i32,
     target_id: QString,
-    year: i32,
+    range: i32,
+    anchor: QString,
+    at_latest: bool,
     max_seconds: f64,
     total_text: QString,
     cells: Vec<HeatCell>,
@@ -130,6 +143,14 @@ fn human_hours(secs: i64) -> String {
     }
 }
 
+fn range_of(value: i32) -> HeatRange {
+    match value {
+        0 => HeatRange::Week,
+        1 => HeatRange::Month,
+        _ => HeatRange::Year,
+    }
+}
+
 impl cxx_qt::Initialize for qobject::GraphModel {
     fn initialize(mut self: Pin<&mut Self>) {
         let conn = match db::open(&db::default_path()) {
@@ -139,15 +160,14 @@ impl cxx_qt::Initialize for qobject::GraphModel {
                 db::open_in_memory().expect("in-memory database")
             }
         };
-        let this_year: i32 = conn
-            .query_row("SELECT strftime('%Y', 'now', 'localtime')", [], |r| {
-                r.get::<_, String>(0)
-            })
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(2026);
+        // Default to the current year.
+        let today: String = conn
+            .query_row("SELECT date('now', 'localtime')", [], |r| r.get(0))
+            .unwrap_or_else(|_| "2026-01-01".to_owned());
+        let anchor = db::snap_anchor(&conn, HeatRange::Year, &today).unwrap_or(today);
         self.as_mut().rust_mut().conn = Some(conn);
-        self.as_mut().rust_mut().year = this_year;
+        self.as_mut().rust_mut().range = 2;
+        self.as_mut().rust_mut().anchor = QString::from(anchor.as_str());
         self.as_mut().reload();
     }
 }
@@ -169,13 +189,16 @@ impl qobject::GraphModel {
     }
 
     fn reload(mut self: Pin<&mut Self>) {
-        let cells = db::year_heatmap(self.db_conn(), &self.target(), self.year).unwrap_or_default();
-        // Pad days are drawn transparent, so scale and total over the year only.
-        // (This also makes `maxSeconds > 0` mean "the year has time", which the
-        // QML relies on for its empty state.)
-        let in_year = || cells.iter().filter(|c| c.in_year).map(|c| c.seconds);
-        let max = in_year().max().unwrap_or(0);
-        let total: i64 = in_year().sum();
+        let range = range_of(self.range);
+        let anchor = self.anchor.to_string();
+        let cells = db::heatmap(self.db_conn(), &self.target(), range, &anchor).unwrap_or_default();
+        // Pad days are drawn transparent, so scale and total over the period
+        // only. (This also makes `maxSeconds > 0` mean "the period has time",
+        // which the QML relies on for its empty state.)
+        let in_period = || cells.iter().filter(|c| c.in_period).map(|c| c.seconds);
+        let max = in_period().max().unwrap_or(0);
+        let total: i64 = in_period().sum();
+        let at_latest = db::heat_at_latest(self.db_conn(), range, &anchor).unwrap_or(true);
 
         // SAFETY: begin/end are paired around the state swap.
         unsafe {
@@ -183,14 +206,24 @@ impl qobject::GraphModel {
             self.as_mut().rust_mut().cells = cells;
             self.as_mut().end_reset_model();
         }
+        self.as_mut().set_at_latest(at_latest);
         self.as_mut().set_max_seconds(max as f64);
         self.as_mut()
             .set_total_text(QString::from(human_hours(total).as_str()));
     }
 
+    /// Overwrite `anchor` with `value` snapped to the current range, emit, reload.
+    fn reanchor(mut self: Pin<&mut Self>, value: &str) {
+        let range = range_of(self.range);
+        let snapped =
+            db::snap_anchor(self.db_conn(), range, value).unwrap_or_else(|_| value.to_owned());
+        self.as_mut().rust_mut().anchor = QString::from(snapped.as_str());
+        self.as_mut().anchor_changed();
+    }
+
     // Custom WRITE setters must emit their own change signal - cxx-qt only
     // auto-emits for auto-generated setters. Without the emit, QML bindings on
-    // these properties (the year label, the sidebar target) go stale.
+    // these properties go stale.
     fn set_target_kind(mut self: Pin<&mut Self>, value: i32) {
         self.as_mut().rust_mut().target_kind = value;
         self.as_mut().target_kind_changed();
@@ -203,9 +236,42 @@ impl qobject::GraphModel {
         self.reload();
     }
 
-    fn set_year(mut self: Pin<&mut Self>, value: i32) {
-        self.as_mut().rust_mut().year = value.clamp(1970, 9999);
-        self.as_mut().year_changed();
+    fn set_range(mut self: Pin<&mut Self>, value: i32) {
+        // If the current period includes today ("now" mode), stay in "now" mode
+        // for the new range; otherwise keep looking at wherever the anchor is.
+        let was_latest = {
+            let range = range_of(self.range);
+            let anchor = self.anchor.to_string();
+            db::heat_at_latest(self.db_conn(), range, &anchor).unwrap_or(false)
+        };
+        self.as_mut().rust_mut().range = value.clamp(0, 2);
+        self.as_mut().range_changed();
+        let seed = if was_latest {
+            self.db_conn()
+                .query_row("SELECT date('now', 'localtime')", [], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap_or_else(|_| self.anchor.to_string())
+        } else {
+            self.anchor.to_string()
+        };
+        self.as_mut().reanchor(&seed);
+        self.reload();
+    }
+
+    fn set_anchor(mut self: Pin<&mut Self>, value: QString) {
+        self.as_mut().reanchor(&value.to_string());
+        self.reload();
+    }
+
+    fn step(mut self: Pin<&mut Self>, direction: i32) {
+        let range = range_of(self.range);
+        let anchor = self.anchor.to_string();
+        let Ok(next) = db::step_anchor(self.db_conn(), range, &anchor, direction) else {
+            return;
+        };
+        self.as_mut().rust_mut().anchor = QString::from(next.as_str());
+        self.as_mut().anchor_changed();
         self.reload();
     }
 
@@ -222,7 +288,7 @@ impl qobject::GraphModel {
             qobject::GraphRole::HoursText => {
                 QVariant::from(&QString::from(human_hours(cell.seconds).as_str()))
             }
-            qobject::GraphRole::InYear => QVariant::from(&cell.in_year),
+            qobject::GraphRole::InPeriod => QVariant::from(&cell.in_period),
             _ => QVariant::default(),
         }
     }
@@ -238,7 +304,10 @@ impl qobject::GraphModel {
             qobject::GraphRole::HoursText.repr,
             QByteArray::from("hoursText"),
         );
-        roles.insert(qobject::GraphRole::InYear.repr, QByteArray::from("inYear"));
+        roles.insert(
+            qobject::GraphRole::InPeriod.repr,
+            QByteArray::from("inPeriod"),
+        );
         roles
     }
 

@@ -698,6 +698,66 @@ pub enum SeriesTarget {
     TaskSubtree(String),
 }
 
+/// The span the heatmap covers: the week, month or year around an anchor date.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeatRange {
+    Week,
+    Month,
+    Year,
+}
+
+impl HeatRange {
+    /// `(grid start, grid end, "inside the period proper" predicate)` as SQL.
+    /// The first two evaluate to a Monday and a Sunday so the grid squares off;
+    /// all three reference `?1`, any ISO date within the period.
+    ///
+    /// `date(X, 'weekday 1', '-7 days')` is deliberately avoided for the Monday
+    /// shift - it overshoots a week when X already is a Monday - so we subtract
+    /// the ISO weekday (`%u`, Mon=1) directly.
+    fn sql(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            HeatRange::Week => (
+                "date(?1, '-' || (strftime('%u', ?1) - 1) || ' days')",
+                "date(?1, '+' || (7 - strftime('%u', ?1)) || ' days')",
+                "1",
+            ),
+            HeatRange::Month => (
+                "date(date(?1,'start of month'), \
+                 '-' || (strftime('%u', date(?1,'start of month')) - 1) || ' days')",
+                "date(date(?1,'start of month','+1 month','-1 day'), \
+                 '+' || (7 - strftime('%u', date(?1,'start of month','+1 month','-1 day'))) || ' days')",
+                "strftime('%Y-%m', span.day) = strftime('%Y-%m', ?1)",
+            ),
+            HeatRange::Year => (
+                "date(date(?1,'start of year'), \
+                 '-' || (strftime('%u', date(?1,'start of year')) - 1) || ' days')",
+                "date(date(?1,'start of year','+1 year','-1 day'), \
+                 '+' || (7 - strftime('%u', date(?1,'start of year','+1 year','-1 day'))) || ' days')",
+                "strftime('%Y', span.day) = strftime('%Y', ?1)",
+            ),
+        }
+    }
+
+    /// The SQLite date modifier for stepping one period.
+    fn step_modifier(self) -> &'static str {
+        match self {
+            HeatRange::Week => "7 days",
+            HeatRange::Month => "1 month",
+            HeatRange::Year => "1 year",
+        }
+    }
+
+    /// The SQLite modifier that snaps a date to this period's first day.
+    fn snap_modifier(self) -> &'static str {
+        match self {
+            // Handled specially (weekday arithmetic); see [`snap_anchor`].
+            HeatRange::Week => "",
+            HeatRange::Month => "start of month",
+            HeatRange::Year => "start of year",
+        }
+    }
+}
+
 /// One day-cell of the calendar heatmap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeatCell {
@@ -705,19 +765,56 @@ pub struct HeatCell {
     pub date: String,
     /// Seconds recorded that day for the target (0 if none).
     pub seconds: i64,
-    /// False for the leading/trailing pad days borrowed from the adjacent
-    /// years to square off the first and last weeks.
-    pub in_year: bool,
+    /// False for the leading/trailing pad days borrowed from the neighbouring
+    /// periods to square off the first and last weeks.
+    pub in_period: bool,
+}
+
+/// Snap `date` (ISO) to the first day of the `range` period containing it - the
+/// Monday for a week, the 1st for a month, Jan 1 for a year. Keeping the anchor
+/// normalised means stepping it by whole months/years can't drift.
+pub fn snap_anchor(conn: &Connection, range: HeatRange, date: &str) -> rusqlite::Result<String> {
+    let expr = match range {
+        HeatRange::Week => "date(?1, '-' || (strftime('%u', ?1) - 1) || ' days')".to_owned(),
+        _ => format!("date(?1, '{}')", range.snap_modifier()),
+    };
+    conn.query_row(&format!("SELECT {expr}"), params![date], |r| r.get(0))
+}
+
+/// Move `anchor` (ISO, already snapped) by `direction` periods and re-snap.
+pub fn step_anchor(
+    conn: &Connection,
+    range: HeatRange,
+    anchor: &str,
+    direction: i32,
+) -> rusqlite::Result<String> {
+    let sign = if direction < 0 { "-" } else { "+" };
+    let stepped: String = conn.query_row(
+        &format!("SELECT date(?1, '{sign}{}')", range.step_modifier()),
+        params![anchor],
+        |r| r.get(0),
+    )?;
+    snap_anchor(conn, range, &stepped)
+}
+
+/// True when the period that `anchor` sits in contains today or lies in the
+/// future - i.e. there is nothing newer to page to.
+pub fn heat_at_latest(conn: &Connection, range: HeatRange, anchor: &str) -> rusqlite::Result<bool> {
+    let today: String = conn.query_row(&format!("SELECT {TODAY}"), [], |r| r.get(0))?;
+    let today_anchor = snap_anchor(conn, range, &today)?;
+    Ok(anchor >= today_anchor.as_str())
 }
 
 /// Dense day-by-day totals for `target` over the Monday-aligned grid that spans
-/// all of `year`. Always 371 cells (53 weeks x 7 days), ordered by week then
-/// weekday (Mon..Sun), so `cells[i]` sits at column `i / 7`, row `i % 7`. A
-/// running timer is not counted.
-pub fn year_heatmap(
+/// the `range` period around `anchor`. Ordered by date (so by week then weekday,
+/// Mon..Sun); `cells[i]` sits at grid column `i / 7`, row `i % 7` for a
+/// week-per-column layout, or row `i / 7`, column `i % 7` for a week-per-row
+/// one. A running timer is not counted.
+pub fn heatmap(
     conn: &Connection,
     target: &SeriesTarget,
-    year: i32,
+    range: HeatRange,
+    anchor: &str,
 ) -> rusqlite::Result<Vec<HeatCell>> {
     let (subtree_cte, predicate, bind): (&str, &str, Option<&str>) = match target {
         SeriesTarget::All => ("", "1", None),
@@ -736,19 +833,16 @@ pub fn year_heatmap(
             Some(id.as_str()),
         ),
     };
-    // The first Monday on-or-before Jan 1 and the last Sunday on-or-after
-    // Dec 31. `date(X, 'weekday 1', '-7 days')` can't be used - it overshoots a
-    // week when X already is a Monday - so shift by the ISO weekday directly.
+    let (lo, hi, in_period) = range.sql();
     let sql = format!(
         "WITH RECURSIVE
            span(day, last) AS (
-             SELECT date(?1 || '-01-01', '-' || (strftime('%u', ?1 || '-01-01') - 1) || ' days'),
-                    date(?1 || '-12-31', '+' || (7 - strftime('%u', ?1 || '-12-31')) || ' days')
+             SELECT {lo}, {hi}
              UNION ALL
              SELECT date(day, '+1 day'), last FROM span WHERE day < last
            ){subtree_cte}
          SELECT span.day,
-                strftime('%Y', span.day) = ?1 AS in_year,
+                {in_period} AS in_period,
                 COALESCE(SUM(strftime('%s', e.end_ts) - strftime('%s', e.start_ts)), 0)
          FROM span
          LEFT JOIN time_entries e
@@ -758,18 +852,17 @@ pub fn year_heatmap(
          GROUP BY span.day
          ORDER BY span.day"
     );
-    let year_s = year.to_string();
     let map_row = |r: &rusqlite::Row<'_>| {
         Ok(HeatCell {
             date: r.get(0)?,
-            in_year: r.get::<_, i64>(1)? != 0,
+            in_period: r.get::<_, i64>(1)? != 0,
             seconds: r.get(2)?,
         })
     };
     let mut stmt = conn.prepare(&sql)?;
     let rows = match bind {
-        Some(id) => stmt.query_map(params![year_s, id], map_row)?,
-        None => stmt.query_map(params![year_s], map_row)?,
+        Some(id) => stmt.query_map(params![anchor, id], map_row)?,
+        None => stmt.query_map(params![anchor], map_row)?,
     };
     rows.collect()
 }
@@ -1269,24 +1362,46 @@ mod tests {
     }
 
     #[test]
-    fn year_heatmap_is_a_squared_371_cell_grid() {
+    fn heatmap_year_is_a_squared_371_cell_grid() {
         let conn = open_in_memory().unwrap();
-        let cells = year_heatmap(&conn, &SeriesTarget::All, 2026).unwrap();
+        let cells = heatmap(&conn, &SeriesTarget::All, HeatRange::Year, "2026-06-15").unwrap();
 
         assert_eq!(cells.len(), 371); // always 53 weeks x 7 days
-        assert_eq!(cells.iter().filter(|c| c.in_year).count(), 365); // 2026 is not a leap year
+        assert_eq!(cells.iter().filter(|c| c.in_period).count(), 365); // 2026 not a leap year
         assert_eq!(cells.first().unwrap().date, "2025-12-29"); // Monday before Jan 1
         assert_eq!(cells.last().unwrap().date, "2027-01-03"); // Sunday after Dec 31
-                                                              // Ordered by date, so cells[i] is at column i/7, row i%7.
-        assert!(cells.windows(2).all(|w| w[0].date < w[1].date));
-        // A leap year still squares off to 371 with 366 in-year days.
-        let leap = year_heatmap(&conn, &SeriesTarget::All, 2024).unwrap();
+        assert!(cells.windows(2).all(|w| w[0].date < w[1].date)); // date order
+                                                                  // A leap year still squares off to 371 with 366 in-period days.
+        let leap = heatmap(&conn, &SeriesTarget::All, HeatRange::Year, "2024-01-01").unwrap();
         assert_eq!(leap.len(), 371);
-        assert_eq!(leap.iter().filter(|c| c.in_year).count(), 366);
+        assert_eq!(leap.iter().filter(|c| c.in_period).count(), 366);
     }
 
     #[test]
-    fn year_heatmap_scopes_and_counts_by_day() {
+    fn heatmap_week_and_month_grids() {
+        let conn = open_in_memory().unwrap();
+
+        // Week: Monday..Sunday of the anchor's week, all in-period.
+        let wk = heatmap(&conn, &SeriesTarget::All, HeatRange::Week, "2026-09-10").unwrap();
+        assert_eq!(wk.len(), 7);
+        assert_eq!(wk.first().unwrap().date, "2026-09-07"); // Monday
+        assert_eq!(wk.last().unwrap().date, "2026-09-13"); // Sunday
+        assert!(wk.iter().all(|c| c.in_period));
+
+        // Month: Monday-aligned weeks spanning the month; March 2026 needs 6.
+        let mar = heatmap(&conn, &SeriesTarget::All, HeatRange::Month, "2026-03-20").unwrap();
+        assert_eq!(mar.len(), 42);
+        assert_eq!(mar.first().unwrap().date, "2026-02-23"); // Monday before Mar 1
+        assert_eq!(mar.last().unwrap().date, "2026-04-05"); // Sunday after Mar 31
+        assert_eq!(mar.iter().filter(|c| c.in_period).count(), 31);
+        // Any month's grid is a whole number of weeks and holds exactly its days.
+        let feb = heatmap(&conn, &SeriesTarget::All, HeatRange::Month, "2026-02-15").unwrap();
+        assert_eq!(feb.len() % 7, 0);
+        assert_eq!(feb.iter().filter(|c| c.in_period).count(), 28);
+    }
+
+    #[test]
+    fn heatmap_scopes_and_counts_by_day() {
         let conn = open_in_memory().unwrap();
         let proj = create_project(&conn, "P").unwrap();
         let parent = create_task(&conn, "parent", None, Some(&proj.id)).unwrap();
@@ -1308,7 +1423,13 @@ mod tests {
         entry(&kid.id, "2025-12-31T09:00:00", "2025-12-31T10:00:00"); // 1h, a pad day
 
         // Subtree = parent + kid; `other` is excluded.
-        let sub = year_heatmap(&conn, &SeriesTarget::TaskSubtree(parent.id.clone()), 2026).unwrap();
+        let sub = heatmap(
+            &conn,
+            &SeriesTarget::TaskSubtree(parent.id.clone()),
+            HeatRange::Year,
+            "2026-01-01",
+        )
+        .unwrap();
         assert_eq!(sub.len(), 371);
         assert_eq!(day_secs(&sub, "2026-03-01"), 5400);
         assert_eq!(day_secs(&sub, "2026-03-05"), 7200);
@@ -1316,24 +1437,97 @@ mod tests {
         assert_eq!(day_secs(&sub, "2025-12-31"), 3600); // pad days carry their totals too
 
         // Project scope == subtree here (kid inherits P).
-        let proj = year_heatmap(&conn, &SeriesTarget::Project(proj.id), 2026).unwrap();
+        let proj = heatmap(
+            &conn,
+            &SeriesTarget::Project(proj.id),
+            HeatRange::Year,
+            "2026-01-01",
+        )
+        .unwrap();
         assert_eq!(proj.len(), 371);
         assert_eq!(day_secs(&proj, "2026-03-01"), 5400);
 
-        // All picks up `other` on top.
-        let all = year_heatmap(&conn, &SeriesTarget::All, 2026).unwrap();
+        // All picks up `other` on top. Row count matches across every target.
+        let all = heatmap(&conn, &SeriesTarget::All, HeatRange::Year, "2026-01-01").unwrap();
         assert_eq!(all.len(), 371);
         assert_eq!(day_secs(&all, "2026-03-01"), 5400 + 10800);
+
+        // A month view of March scopes to that month's cells only.
+        let mar = heatmap(
+            &conn,
+            &SeriesTarget::TaskSubtree(parent.id),
+            HeatRange::Month,
+            "2026-03-15",
+        )
+        .unwrap();
+        assert_eq!(day_secs(&mar, "2026-03-01"), 5400);
+        assert_eq!(day_secs(&mar, "2026-03-05"), 7200);
     }
 
     #[test]
-    fn year_heatmap_ignores_running_timer() {
+    fn heatmap_ignores_running_timer() {
         let conn = open_in_memory().unwrap();
         let t = root(&conn, "t");
         start_timer(&conn, &t.id).unwrap();
-        let cells = year_heatmap(&conn, &SeriesTarget::All, 2026).unwrap();
+        let cells = heatmap(&conn, &SeriesTarget::All, HeatRange::Year, "2026-01-01").unwrap();
         assert_eq!(cells.len(), 371);
         assert!(cells.iter().all(|c| c.seconds == 0));
+    }
+
+    #[test]
+    fn heat_at_latest_tracks_the_current_period() {
+        let conn = open_in_memory().unwrap();
+        let today: String = conn
+            .query_row("SELECT date('now','localtime')", [], |r| r.get(0))
+            .unwrap();
+        let this_year = snap_anchor(&conn, HeatRange::Year, &today).unwrap();
+
+        assert!(heat_at_latest(&conn, HeatRange::Year, &this_year).unwrap());
+        let last_year = step_anchor(&conn, HeatRange::Year, &this_year, -1).unwrap();
+        assert!(!heat_at_latest(&conn, HeatRange::Year, &last_year).unwrap());
+        // A future period also counts as "nothing newer to page to".
+        let next_year = step_anchor(&conn, HeatRange::Year, &this_year, 1).unwrap();
+        assert!(heat_at_latest(&conn, HeatRange::Year, &next_year).unwrap());
+    }
+
+    #[test]
+    fn anchor_snapping_and_stepping_do_not_drift() {
+        let conn = open_in_memory().unwrap();
+
+        // Snap: any day in the period -> its first day.
+        assert_eq!(
+            snap_anchor(&conn, HeatRange::Week, "2026-09-10").unwrap(),
+            "2026-09-07"
+        );
+        assert_eq!(
+            snap_anchor(&conn, HeatRange::Month, "2026-09-30").unwrap(),
+            "2026-09-01"
+        );
+        assert_eq!(
+            snap_anchor(&conn, HeatRange::Year, "2026-12-31").unwrap(),
+            "2026-01-01"
+        );
+
+        // Step: from a month end, forward must land in the *next* month, not skip
+        // it (the classic `setMonth(+1)` on the 31st bug).
+        let jan = snap_anchor(&conn, HeatRange::Month, "2026-01-31").unwrap();
+        assert_eq!(jan, "2026-01-01");
+        assert_eq!(
+            step_anchor(&conn, HeatRange::Month, &jan, 1).unwrap(),
+            "2026-02-01"
+        );
+        assert_eq!(
+            step_anchor(&conn, HeatRange::Month, "2026-03-01", -1).unwrap(),
+            "2026-02-01"
+        );
+        assert_eq!(
+            step_anchor(&conn, HeatRange::Week, "2026-09-07", 1).unwrap(),
+            "2026-09-14"
+        );
+        assert_eq!(
+            step_anchor(&conn, HeatRange::Year, "2026-01-01", -1).unwrap(),
+            "2025-01-01"
+        );
     }
 
     #[test]

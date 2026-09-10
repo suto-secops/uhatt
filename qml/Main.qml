@@ -13,11 +13,6 @@ ApplicationWindow {
     visible: true
     title: qsTr("uhatt")
 
-    // The current calendar year, for capping the graph's year stepper.
-    function currentYear() {
-        return new Date().getFullYear()
-    }
-
     // Today plus `days`, formatted as an ISO calendar date.
     function isoPlusDays(days) {
         let d = new Date()
@@ -74,7 +69,7 @@ ApplicationWindow {
         modal: true
         anchors.centerIn: Overlay.overlay
         width: 800
-        height: 310
+        height: 400
         standardButtons: Dialog.Close
 
         // Highlight colour at a given 0..1 intensity; the faint "no time" tint
@@ -86,10 +81,30 @@ ApplicationWindow {
                            0.2 + 0.8 * Math.min(1, intensity))
         }
 
-        // For each month, the grid column its 1st falls in. The grid starts on
-        // the Monday on-or-before Jan 1, so column = whole weeks from there.
+        // ISO "yyyy-MM-dd" to a local Date (component-wise, so no TZ shift).
+        function isoToDate(s) {
+            let p = s.split("-")
+            return new Date(parseInt(p[0]), parseInt(p[1]) - 1, parseInt(p[2]))
+        }
+
+        // Label for the period on show: "2026" / "September 2026" / "7–13 Sep 2026".
+        function periodLabel() {
+            let d = graphDialog.isoToDate(graph.anchor)
+            if (graph.range === 2)
+                return "" + d.getFullYear()
+            if (graph.range === 1)
+                return Qt.locale().standaloneMonthName(d.getMonth()) + " " + d.getFullYear()
+            let end = new Date(d)
+            end.setDate(d.getDate() + 6)
+            let a = Qt.locale().standaloneMonthName(d.getMonth(), Locale.ShortFormat)
+            let b = Qt.locale().standaloneMonthName(end.getMonth(), Locale.ShortFormat)
+            return d.getDate() + " " + a + " – " + end.getDate() + " " + b + " " + end.getFullYear()
+        }
+
+        // Year view only: the grid column each month's 1st falls in. The grid
+        // starts on the Monday on-or-before Jan 1, so column = whole weeks.
         function monthColumns() {
-            let y = graph.year
+            let y = graphDialog.isoToDate(graph.anchor).getFullYear()
             let jan1 = new Date(y, 0, 1)
             let isoDow = (jan1.getDay() + 6) % 7   // Mon=0 .. Sun=6
             let gridStart = new Date(y, 0, 1 - isoDow)
@@ -104,32 +119,45 @@ ApplicationWindow {
         contentItem: ColumnLayout {
             spacing: 12
 
-            // ---- Header: total + year stepper ---------------------------
+            // ---- Header: total + range switch + period stepper ---------
             RowLayout {
                 Layout.fillWidth: true
+                spacing: 6
                 Label {
-                    text: qsTr("Total in %1: %2").arg(graph.year).arg(graph.totalText)
+                    text: qsTr("Total: %1").arg(graph.totalText)
                     font.bold: true
                 }
                 Item { Layout.fillWidth: true }
+                Repeater {
+                    model: [qsTr("Week"), qsTr("Month"), qsTr("Year")]
+                    delegate: Button {
+                        required property int index
+                        required property string modelData
+                        text: modelData
+                        checkable: true
+                        checked: graph.range === index
+                        onClicked: graph.range = index
+                    }
+                }
+                Item { Layout.preferredWidth: 8 }
                 ToolButton {
                     text: "‹"
-                    onClicked: graph.year = graph.year - 1
+                    onClicked: graph.step(-1)
                 }
                 Label {
-                    text: graph.year
+                    text: graphDialog.periodLabel()
                     font.bold: true
                     horizontalAlignment: Text.AlignHCenter
-                    Layout.preferredWidth: 48
+                    Layout.minimumWidth: 128
                 }
                 ToolButton {
                     text: "›"
-                    enabled: graph.year < root.currentYear()
-                    onClicked: graph.year = graph.year + 1
+                    enabled: !graph.atLatest
+                    onClicked: graph.step(1)
                 }
             }
 
-            // ---- Heatmap ------------------------------------------------
+            // ---- Heatmap ----------------------------------------------
             Item {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
@@ -137,30 +165,31 @@ ApplicationWindow {
                 Label {
                     anchors.centerIn: parent
                     visible: graph.maxSeconds <= 0
-                    text: qsTr("No time recorded in %1").arg(graph.year)
+                    text: qsTr("No time recorded in this %1")
+                          .arg([qsTr("week"), qsTr("month"), qsTr("year")][graph.range])
                     opacity: 0.5
                 }
 
+                // ---- Year: the GitHub-style 53-week grid --------------
                 ColumnLayout {
-                    id: heatBody
+                    id: yearBody
                     anchors.top: parent.top
                     anchors.horizontalCenter: parent.horizontalCenter
                     anchors.topMargin: 6
-                    visible: graph.maxSeconds > 0
+                    visible: graph.maxSeconds > 0 && graph.range === 2
                     spacing: 6
 
                     readonly property int weekdayColWidth: 26
 
-                    // Month labels, positioned over the column of each 1st.
                     Item {
-                        Layout.leftMargin: heatBody.weekdayColWidth + 4
-                        Layout.preferredWidth: 53 * (heatGrid.cell + heatGrid.columnSpacing)
+                        Layout.leftMargin: yearBody.weekdayColWidth + 4
+                        Layout.preferredWidth: 53 * (yearGrid.cell + yearGrid.columnSpacing)
                         Layout.preferredHeight: 12
                         Repeater {
                             model: graphDialog.monthColumns()
                             delegate: Label {
                                 required property var modelData
-                                x: modelData.col * (heatGrid.cell + heatGrid.columnSpacing)
+                                x: modelData.col * (yearGrid.cell + yearGrid.columnSpacing)
                                 text: modelData.name
                                 font.pointSize: 7
                                 opacity: 0.6
@@ -171,10 +200,9 @@ ApplicationWindow {
                     RowLayout {
                         spacing: 4
 
-                        // Weekday labels, aligned to the grid rows.
                         ColumnLayout {
-                            Layout.preferredWidth: heatBody.weekdayColWidth
-                            spacing: heatGrid.rowSpacing
+                            Layout.preferredWidth: yearBody.weekdayColWidth
+                            spacing: yearGrid.rowSpacing
                             Repeater {
                                 model: [qsTr("Mon"), "", qsTr("Wed"), "", qsTr("Fri"), "", ""]
                                 delegate: Label {
@@ -182,16 +210,16 @@ ApplicationWindow {
                                     text: modelData
                                     font.pointSize: 7
                                     opacity: 0.6
-                                    Layout.preferredHeight: heatGrid.cell
+                                    Layout.preferredHeight: yearGrid.cell
                                     verticalAlignment: Text.AlignVCenter
                                 }
                             }
                         }
 
                         // 53 columns x 7 rows, filled column-by-column: the
-                        // model is ordered by week then weekday to match.
+                        // model is date-ordered (week then weekday) to match.
                         Grid {
-                            id: heatGrid
+                            id: yearGrid
                             readonly property int cell: 11
                             rows: 7
                             flow: Grid.TopToBottom
@@ -199,49 +227,114 @@ ApplicationWindow {
                             columnSpacing: 3
 
                             Repeater {
-                                model: graph
+                                model: graph.range === 2 ? graph : 0
                                 delegate: Rectangle {
                                     required property string date
                                     required property real seconds
                                     required property string hoursText
-                                    required property bool inYear
+                                    required property bool inPeriod
 
-                                    width: heatGrid.cell
-                                    height: heatGrid.cell
+                                    width: yearGrid.cell
+                                    height: yearGrid.cell
                                     radius: 2
-                                    color: !inYear
+                                    color: !inPeriod
                                            ? "transparent"
                                            : graphDialog.heat(graph.maxSeconds > 0 ? seconds / graph.maxSeconds : 0)
 
-                                    HoverHandler {
-                                        id: cellHover
-                                        enabled: inYear
-                                    }
-                                    ToolTip.visible: cellHover.hovered
+                                    HoverHandler { id: yHover; enabled: inPeriod }
+                                    ToolTip.visible: yHover.hovered
                                     ToolTip.text: date + " · " + hoursText
                                 }
                             }
                         }
                     }
+                }
 
-                    // Legend.
-                    RowLayout {
-                        Layout.alignment: Qt.AlignRight
-                        spacing: 4
-                        Label { text: qsTr("Less"); font.pointSize: 7; opacity: 0.6 }
+                // ---- Week / Month: a calendar grid -------------------
+                ColumnLayout {
+                    id: calBody
+                    anchors.centerIn: parent
+                    visible: graph.maxSeconds > 0 && graph.range !== 2
+                    spacing: 4
+
+                    readonly property int cell: 34
+
+                    Row {
+                        spacing: calGrid.columnSpacing
                         Repeater {
-                            model: [0, 0.35, 0.6, 0.85, 1.0]
-                            delegate: Rectangle {
-                                required property real modelData
-                                width: heatGrid.cell
-                                height: heatGrid.cell
-                                radius: 2
-                                color: graphDialog.heat(modelData)
+                            model: [qsTr("Mon"), qsTr("Tue"), qsTr("Wed"), qsTr("Thu"),
+                                    qsTr("Fri"), qsTr("Sat"), qsTr("Sun")]
+                            delegate: Label {
+                                required property string modelData
+                                width: calBody.cell
+                                horizontalAlignment: Text.AlignHCenter
+                                text: modelData
+                                font.pointSize: 8
+                                opacity: 0.6
                             }
                         }
-                        Label { text: qsTr("More"); font.pointSize: 7; opacity: 0.6 }
+                    }
+
+                    // columns:7, filled row-by-row: the model is date-ordered
+                    // starting on a Monday, so weeks become rows.
+                    Grid {
+                        id: calGrid
+                        columns: 7
+                        flow: Grid.LeftToRight
+                        rowSpacing: 4
+                        columnSpacing: 4
+
+                        Repeater {
+                            model: graph.range !== 2 ? graph : 0
+                            delegate: Rectangle {
+                                required property string date
+                                required property real seconds
+                                required property string hoursText
+                                required property bool inPeriod
+
+                                width: calBody.cell
+                                height: calBody.cell
+                                radius: 3
+                                color: !inPeriod
+                                       ? "transparent"
+                                       : graphDialog.heat(graph.maxSeconds > 0 ? seconds / graph.maxSeconds : 0)
+
+                                Label {
+                                    anchors.left: parent.left
+                                    anchors.top: parent.top
+                                    anchors.margins: 3
+                                    text: parseInt(parent.date.substring(8, 10))
+                                    font.pointSize: 8
+                                    opacity: parent.inPeriod ? 0.85 : 0.25
+                                }
+
+                                HoverHandler { id: cHover; enabled: inPeriod }
+                                ToolTip.visible: cHover.hovered
+                                ToolTip.text: date + " · " + hoursText
+                            }
+                        }
                     }
                 }
+
+            }
+
+            // ---- Legend --------------------------------------------------
+            RowLayout {
+                Layout.alignment: Qt.AlignRight
+                visible: graph.maxSeconds > 0
+                spacing: 4
+                Label { text: qsTr("Less"); font.pointSize: 7; opacity: 0.6 }
+                Repeater {
+                    model: [0, 0.35, 0.6, 0.85, 1.0]
+                    delegate: Rectangle {
+                        required property real modelData
+                        width: 11
+                        height: 11
+                        radius: 2
+                        color: graphDialog.heat(modelData)
+                    }
+                }
+                Label { text: qsTr("More"); font.pointSize: 7; opacity: 0.6 }
             }
         }
     }
