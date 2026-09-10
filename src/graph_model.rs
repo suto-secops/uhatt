@@ -170,8 +170,12 @@ impl qobject::GraphModel {
 
     fn reload(mut self: Pin<&mut Self>) {
         let cells = db::year_heatmap(self.db_conn(), &self.target(), self.year).unwrap_or_default();
-        let max = cells.iter().map(|c| c.seconds).max().unwrap_or(0);
-        let total: i64 = cells.iter().filter(|c| c.in_year).map(|c| c.seconds).sum();
+        // Pad days are drawn transparent, so scale and total over the year only.
+        // (This also makes `maxSeconds > 0` mean "the year has time", which the
+        // QML relies on for its empty state.)
+        let in_year = || cells.iter().filter(|c| c.in_year).map(|c| c.seconds);
+        let max = in_year().max().unwrap_or(0);
+        let total: i64 = in_year().sum();
 
         // SAFETY: begin/end are paired around the state swap.
         unsafe {
