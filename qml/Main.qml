@@ -586,7 +586,7 @@ ApplicationWindow {
         modal: true
         anchors.centerIn: Overlay.overlay
         width: 500
-        height: 420
+        height: 560
         padding: 18
         standardButtons: Dialog.Close
 
@@ -675,6 +675,59 @@ ApplicationWindow {
                         let s = settings.countdownText(iso)
                         return s === "" ? qsTr("(hidden)")
                                         : qsTr("e.g. “%1  ·  %2”").arg(iso).arg(s)
+                    }
+                }
+            }
+
+            // ---- Calendar group ----
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 2
+
+                Label {
+                    text: qsTr("Calendar")
+                    font.bold: true
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 8
+                    spacing: 10
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 2
+                        Label { text: qsTr("Cross out past days") }
+                        Label {
+                            Layout.fillWidth: true
+                            text: qsTr("Strike a line through days that have already passed (blue, or a faint red when the day has overdue tasks).")
+                            font.pointSize: 8
+                            opacity: 0.6
+                            wrapMode: Text.WordWrap
+                        }
+                    }
+                    Switch {
+                        checked: settings.calendarCrossPast
+                        onToggled: settings.calendarCrossPast = checked
+                    }
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 8
+                    spacing: 10
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 2
+                        Label { text: qsTr("Hide days from other months") }
+                        Label {
+                            Layout.fillWidth: true
+                            text: qsTr("Leave the leading and trailing days of the next/previous month blank instead of dimmed.")
+                            font.pointSize: 8
+                            opacity: 0.6
+                            wrapMode: Text.WordWrap
+                        }
+                    }
+                    Switch {
+                        checked: settings.calendarHideOtherMonth
+                        onToggled: settings.calendarHideOtherMonth = checked
                     }
                 }
             }
@@ -1836,6 +1889,20 @@ ApplicationWindow {
                                 1 - isoDow)
             }
 
+            readonly property string todayIso:
+                Qt.formatDate(new Date(), "yyyy-MM-dd")
+            // Weeks to draw: a full 6 rows normally; only the rows that hold a
+            // day of this month when adjacent-month days are hidden.
+            readonly property int weeksShown: {
+                if (!settings.calendarHideOtherMonth)
+                    return 6
+                let first = new Date(calendarPane.viewYear, calendarPane.viewMonth, 1)
+                let pad = (first.getDay() + 6) % 7
+                let days = new Date(calendarPane.viewYear,
+                                    calendarPane.viewMonth + 1, 0).getDate()
+                return Math.ceil((pad + days) / 7)
+            }
+
             // ---- Header: mode switch + month stepper -----------------
             RowLayout {
                 Layout.fillWidth: true
@@ -1915,7 +1982,7 @@ ApplicationWindow {
                     }
 
                     Repeater {
-                        model: 42
+                        model: calendarPane.weeksShown * 7
                         delegate: ItemDelegate {
                             id: cell
                             required property int index
@@ -1930,17 +1997,30 @@ ApplicationWindow {
                             readonly property bool inMonth:
                                 cell.cellDate.getMonth() === calendarPane.viewMonth
                             readonly property bool isToday:
-                                cell.iso === Qt.formatDate(new Date(), "yyyy-MM-dd")
+                                cell.iso === calendarPane.todayIso
+                            // Hidden slot: an adjacent-month day when the user
+                            // has chosen not to see them. Kept in the grid so
+                            // the columns still line up, but blank and inert.
+                            readonly property bool blank:
+                                settings.calendarHideOtherMonth && !cell.inMonth
+                            readonly property bool past:
+                                cell.iso < calendarPane.todayIso
                             readonly property var dayItems:
-                                calendarPane.byDay[cell.iso] || []
+                                cell.blank ? [] : (calendarPane.byDay[cell.iso] || [])
+                            readonly property bool hasOverdue:
+                                cell.dayItems.some(function (it) { return it.overdue })
 
                             Layout.fillWidth: true
                             Layout.preferredHeight: 92
                             padding: 4
-                            highlighted: cell.iso === calendarPane.selectedIso
-                            onClicked: calendarPane.selectedIso = cell.iso
+                            enabled: !cell.blank
+                            highlighted: !cell.blank
+                                         && cell.iso === calendarPane.selectedIso
+                            onClicked: if (!cell.blank)
+                                calendarPane.selectedIso = cell.iso
 
                             contentItem: ColumnLayout {
+                                visible: !cell.blank
                                 spacing: 2
                                 RowLayout {
                                     Layout.fillWidth: true
@@ -1979,6 +2059,39 @@ ApplicationWindow {
                                     opacity: 0.5
                                 }
                                 Item { Layout.fillHeight: true }
+                            }
+
+                            // Strike-through for past days. Blue normally; a
+                            // faint red when the day holds overdue tasks, so
+                            // their titles stay readable underneath.
+                            Item {
+                                anchors.fill: parent
+                                visible: settings.calendarCrossPast
+                                         && cell.past && !cell.blank
+                                z: 2
+
+                                readonly property color mark: cell.hasOverdue
+                                    ? Qt.rgba(0.9, 0.25, 0.2, 0.35)
+                                    : palette.highlight
+                                readonly property real diag:
+                                    Math.hypot(width, height)
+
+                                Rectangle {
+                                    anchors.centerIn: parent
+                                    width: parent.diag
+                                    height: 2
+                                    color: parent.mark
+                                    rotation: 45
+                                    antialiasing: true
+                                }
+                                Rectangle {
+                                    anchors.centerIn: parent
+                                    width: parent.diag
+                                    height: 2
+                                    color: parent.mark
+                                    rotation: -45
+                                    antialiasing: true
+                                }
                             }
                         }
                     }

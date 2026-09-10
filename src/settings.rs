@@ -24,6 +24,10 @@ pub mod qobject {
         #[qml_element]
         // 0 off, 1 optimal, 2 days, 3 weeks, 4 months, 5 hours.
         #[qproperty(i32, deadline_countdown, cxx_name = "deadlineCountdown", READ, WRITE = set_deadline_countdown, NOTIFY)]
+        // Calendar page: strike a red/blue X through past days.
+        #[qproperty(bool, calendar_cross_past, cxx_name = "calendarCrossPast", READ, WRITE = set_calendar_cross_past, NOTIFY)]
+        // Calendar page: hide the leading/trailing days of adjacent months.
+        #[qproperty(bool, calendar_hide_other_month, cxx_name = "calendarHideOtherMonth", READ, WRITE = set_calendar_hide_other_month, NOTIFY)]
         type Settings = super::SettingsRust;
     }
 
@@ -32,6 +36,12 @@ pub mod qobject {
     extern "RustQt" {
         #[cxx_name = "setDeadlineCountdown"]
         fn set_deadline_countdown(self: Pin<&mut Settings>, value: i32);
+
+        #[cxx_name = "setCalendarCrossPast"]
+        fn set_calendar_cross_past(self: Pin<&mut Settings>, value: bool);
+
+        #[cxx_name = "setCalendarHideOtherMonth"]
+        fn set_calendar_hide_other_month(self: Pin<&mut Settings>, value: bool);
 
         /// "time left until `iso_date`" per the current setting; "" when the
         /// countdown is off or the date can't be read.
@@ -42,14 +52,30 @@ pub mod qobject {
 }
 
 /// Backing state for [`qobject::Settings`].
-#[derive(Default)]
 pub struct SettingsRust {
     conn: Option<Connection>,
     deadline_countdown: i32,
+    calendar_cross_past: bool,
+    calendar_hide_other_month: bool,
 }
 
-/// `meta` key the deadline-countdown mode is stored under.
+impl Default for SettingsRust {
+    fn default() -> Self {
+        Self {
+            conn: None,
+            deadline_countdown: 0,
+            // Cross past days on by default; hiding adjacent-month days off
+            // (the grid shows them until the user opts out).
+            calendar_cross_past: true,
+            calendar_hide_other_month: false,
+        }
+    }
+}
+
+/// `meta` keys settings are stored under.
 const COUNTDOWN_KEY: &str = "deadline_countdown";
+const CROSS_PAST_KEY: &str = "calendar_cross_past";
+const HIDE_OTHER_MONTH_KEY: &str = "calendar_hide_other_month";
 
 fn mode_of(value: i32) -> CountdownMode {
     match value {
@@ -71,13 +97,36 @@ impl cxx_qt::Initialize for qobject::Settings {
                 db::open_in_memory().expect("in-memory database")
             }
         };
-        let stored = db::get_meta(&conn, COUNTDOWN_KEY)
+        let countdown = db::get_meta(&conn, COUNTDOWN_KEY)
             .ok()
             .flatten()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        self.as_mut().rust_mut().conn = Some(conn);
-        self.as_mut().rust_mut().deadline_countdown = stored;
+        let cross_past = read_bool(&conn, CROSS_PAST_KEY, true);
+        let hide_other_month = read_bool(&conn, HIDE_OTHER_MONTH_KEY, false);
+        {
+            let mut rust = self.as_mut().rust_mut();
+            rust.conn = Some(conn);
+            rust.deadline_countdown = countdown;
+            rust.calendar_cross_past = cross_past;
+            rust.calendar_hide_other_month = hide_other_month;
+        }
+    }
+}
+
+/// A `meta` flag stored as `"1"` / `"0"`, falling back to `default`.
+fn read_bool(conn: &Connection, key: &str, default: bool) -> bool {
+    match db::get_meta(conn, key).ok().flatten() {
+        Some(s) => s == "1",
+        None => default,
+    }
+}
+
+/// Persist a `meta` flag as `"1"` / `"0"`, logging on failure.
+fn persist_bool(conn: &Connection, key: &str, value: bool) {
+    let v = if value { "1" } else { "0" };
+    if let Err(e) = db::set_meta(conn, key, v) {
+        eprintln!("uhatt: could not save setting {key}: {e}");
     }
 }
 
@@ -100,6 +149,25 @@ impl qobject::Settings {
         self.as_mut().deadline_countdown_changed();
     }
 
+    fn set_calendar_cross_past(mut self: Pin<&mut Self>, value: bool) {
+        if self.calendar_cross_past == value {
+            return;
+        }
+        self.as_mut().rust_mut().calendar_cross_past = value;
+        persist_bool(self.db_conn(), CROSS_PAST_KEY, value);
+        // Custom-WRITE properties don't auto-emit; the calendar binds to this.
+        self.as_mut().calendar_cross_past_changed();
+    }
+
+    fn set_calendar_hide_other_month(mut self: Pin<&mut Self>, value: bool) {
+        if self.calendar_hide_other_month == value {
+            return;
+        }
+        self.as_mut().rust_mut().calendar_hide_other_month = value;
+        persist_bool(self.db_conn(), HIDE_OTHER_MONTH_KEY, value);
+        self.as_mut().calendar_hide_other_month_changed();
+    }
+
     fn countdown_text(&self, iso_date: &QString) -> QString {
         let text = db::deadline_countdown(
             self.db_conn(),
@@ -108,5 +176,26 @@ impl qobject::Settings {
         )
         .unwrap_or_default();
         QString::from(text.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calendar_flags_round_trip_through_meta_with_defaults() {
+        let conn = db::open_in_memory().unwrap();
+
+        // Unset -> the caller's default.
+        assert!(read_bool(&conn, CROSS_PAST_KEY, true));
+        assert!(!read_bool(&conn, HIDE_OTHER_MONTH_KEY, false));
+
+        persist_bool(&conn, CROSS_PAST_KEY, false);
+        persist_bool(&conn, HIDE_OTHER_MONTH_KEY, true);
+
+        // Stored value wins over the default, both ways.
+        assert!(!read_bool(&conn, CROSS_PAST_KEY, true));
+        assert!(read_bool(&conn, HIDE_OTHER_MONTH_KEY, false));
     }
 }
