@@ -488,6 +488,19 @@ pub fn stop_timer(conn: &Connection) -> rusqlite::Result<Option<TimeEntry>> {
     get_entry(conn, &entry.id)
 }
 
+/// Duration of a closed entry in whole seconds (0 if it is still open or gone).
+/// Used by the timer's pause/resume bookkeeping to accumulate worked time.
+pub fn entry_duration_seconds(conn: &Connection, id: &str) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COALESCE(strftime('%s', end_ts) - strftime('%s', start_ts), 0)
+         FROM time_entries WHERE id = ?1",
+        params![id],
+        |r| r.get(0),
+    )
+    .optional()
+    .map(|o| o.unwrap_or(0))
+}
+
 /// True for `YYYY-MM-DDTHH:MM` or `YYYY-MM-DDTHH:MM:SS` (a space instead of `T`
 /// is also accepted). Cheap structural check, not a full calendar validation.
 fn is_iso_datetime(s: &str) -> bool {
@@ -1013,6 +1026,24 @@ mod tests {
 
         // Stopping again is a harmless no-op.
         assert!(stop_timer(&conn).unwrap().is_none());
+    }
+
+    #[test]
+    fn entry_duration_seconds_reads_a_closed_span() {
+        let conn = open_in_memory().unwrap();
+        let t = root(&conn, "t");
+        conn.execute(
+            "INSERT INTO time_entries (id, task_id, start_ts, end_ts, created_at)
+             VALUES ('d1', ?1, '2026-03-01T09:00:00', '2026-03-01T09:45:30', '2026-03-01T09:45:30')",
+            params![t.id],
+        )
+        .unwrap();
+        assert_eq!(entry_duration_seconds(&conn, "d1").unwrap(), 45 * 60 + 30);
+        // Open or missing entries read as zero.
+        start_timer(&conn, &t.id).unwrap();
+        let open = running_entry(&conn).unwrap().unwrap();
+        assert_eq!(entry_duration_seconds(&conn, &open.id).unwrap(), 0);
+        assert_eq!(entry_duration_seconds(&conn, "nope").unwrap(), 0);
     }
 
     #[test]
