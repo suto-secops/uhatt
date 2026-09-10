@@ -72,6 +72,26 @@ ApplicationWindow {
     // page is opened so deadline edits made on the task list show up.
     onMainViewChanged: if (mainView === "calendar") calendar.reload()
 
+    // Shared SplitView divider: a wider hit area with the same grey line the
+    // sidebar's horizontal separators use, tinted on hover / drag.
+    Component {
+        id: splitHandle
+        Rectangle {
+            implicitWidth: 8
+            color: SplitHandle.pressed
+                   ? Qt.rgba(palette.highlight.r, palette.highlight.g,
+                             palette.highlight.b, 0.5)
+                   : SplitHandle.hovered
+                   ? Qt.rgba(palette.highlight.r, palette.highlight.g,
+                             palette.highlight.b, 0.22)
+                   : "transparent"
+            ToolSeparator {
+                anchors.centerIn: parent
+                height: parent.height
+            }
+        }
+    }
+
     // Floating chip shown under the cursor while a task is being dragged onto
     // another to re-parent it. Lives at the window level so it isn't clipped by
     // the task list.
@@ -844,22 +864,7 @@ ApplicationWindow {
             Layout.fillWidth: true
             Layout.fillHeight: true
             orientation: Qt.Horizontal
-
-            // A grabbable divider (the Basic style's default is a hairline).
-            handle: Rectangle {
-                implicitWidth: 8
-                color: SplitHandle.pressed ? palette.highlight
-                     : SplitHandle.hovered ? Qt.rgba(palette.highlight.r,
-                                                     palette.highlight.g,
-                                                     palette.highlight.b, 0.4)
-                     : "transparent"
-                Rectangle {
-                    anchors.centerIn: parent
-                    width: 1
-                    height: parent.height
-                    color: palette.mid
-                }
-            }
+            handle: splitHandle
 
         // ---- Sidebar -----------------------------------------------------
         ColumnLayout {
@@ -1950,16 +1955,17 @@ ApplicationWindow {
             }
 
             // ---- Grid mode: month calendar + selected-day list -------
-            RowLayout {
+            SplitView {
                 visible: calendarPane.mode === "grid"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                spacing: 12
+                orientation: Qt.Horizontal
+                handle: splitHandle
 
                 // Month grid, held to the top so the cells stay compact.
                 ColumnLayout {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
+                    SplitView.fillWidth: true
+                    SplitView.minimumWidth: 320
                     spacing: 0
 
                 GridLayout {
@@ -2101,8 +2107,9 @@ ApplicationWindow {
 
                 // Selected-day detail.
                 ColumnLayout {
-                    Layout.preferredWidth: 220
-                    Layout.fillHeight: true
+                    SplitView.preferredWidth: 240
+                    SplitView.minimumWidth: 180
+                    SplitView.maximumWidth: 460
                     spacing: 6
 
                     Label {
