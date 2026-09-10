@@ -344,6 +344,16 @@ ApplicationWindow {
         onTriggered: root.tick++
     }
 
+    // Keep meta.timer_heartbeat fresh so a crash can be recovered to within
+    // ~30 s. Only runs while a segment is actually counting.
+    Timer {
+        interval: 30000
+        repeat: true
+        running: timer.runningSince !== ""
+        triggeredOnStart: true
+        onTriggered: timer.heartbeat()
+    }
+
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: 12
@@ -381,7 +391,10 @@ ApplicationWindow {
                 }
                 Label {
                     visible: timer.paused
-                    text: qsTr("paused")
+                    // A crash-recovered session reads as a pause too, but say why.
+                    text: timer.recovered
+                          ? qsTr("paused — app closed while running")
+                          : qsTr("paused")
                     opacity: 0.7
                 }
                 Label {
