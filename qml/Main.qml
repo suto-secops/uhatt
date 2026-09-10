@@ -68,6 +68,8 @@ ApplicationWindow {
 
     // Which page fills the centre pane: "tasks" (the list) or "calendar".
     property string mainView: "tasks"
+    // Sidebar width - fixed unless the user drags the divider.
+    property real sidebarWidth: 200
     // The calendar loads its data once at startup; re-read it each time the
     // page is opened so deadline edits made on the task list show up.
     onMainViewChanged: if (mainView === "calendar") calendar.reload()
@@ -860,17 +862,20 @@ ApplicationWindow {
             }
         }
 
-        SplitView {
+        RowLayout {
             id: mainSplit
             Layout.fillWidth: true
             Layout.fillHeight: true
-            orientation: Qt.Horizontal
+            spacing: 0
 
         // ---- Sidebar -----------------------------------------------------
         ColumnLayout {
-            SplitView.preferredWidth: 200
-            SplitView.minimumWidth: 160
-            SplitView.maximumWidth: 420
+            // Rigid width - only the divider drag changes it, so it stays put
+            // across view/panel switches.
+            Layout.preferredWidth: root.sidebarWidth
+            Layout.minimumWidth: root.sidebarWidth
+            Layout.maximumWidth: root.sidebarWidth
+            Layout.fillHeight: true
             spacing: 4
 
             Label {
@@ -1037,9 +1042,43 @@ ApplicationWindow {
             Item { Layout.fillHeight: true }
         }
 
+        // ---- Divider: drag to resize the sidebar --------------------
+        Rectangle {
+            Layout.preferredWidth: 8
+            Layout.fillHeight: true
+            color: sidebarDrag.pressed
+                   ? Qt.rgba(palette.highlight.r, palette.highlight.g,
+                             palette.highlight.b, 0.5)
+                   : sidebarDrag.containsMouse
+                   ? Qt.rgba(palette.highlight.r, palette.highlight.g,
+                             palette.highlight.b, 0.22)
+                   : "transparent"
+            ToolSeparator {
+                anchors.centerIn: parent
+                height: parent.height
+            }
+            MouseArea {
+                id: sidebarDrag
+                anchors.fill: parent
+                anchors.leftMargin: -3
+                anchors.rightMargin: -3
+                hoverEnabled: true
+                cursorShape: Qt.SplitHCursor
+                // Offset of the cursor from the divider's left edge, captured
+                // on press so the divider doesn't jump under the cursor.
+                property real grabDx: 0
+                onPressed: grabDx = mapToItem(mainSplit, mouseX, 0).x
+                                    - root.sidebarWidth
+                onPositionChanged: if (pressed)
+                    root.sidebarWidth = Math.max(160, Math.min(440,
+                        mapToItem(mainSplit, mouseX, 0).x - grabDx))
+            }
+        }
+
         // ---- Centre pane: task list or calendar ----------------------
         StackLayout {
-            SplitView.fillWidth: true
+            Layout.fillWidth: true
+            Layout.fillHeight: true
             currentIndex: root.mainView === "calendar" ? 1 : 0
 
         // ---- Tasks -----------------------------------------------------
@@ -1840,6 +1879,8 @@ ApplicationWindow {
             property int viewMonth: new Date().getMonth()
             // Selected day, ISO "yyyy-MM-dd".
             property string selectedIso: Qt.formatDate(new Date(), "yyyy-MM-dd")
+            // Day-detail pane width - fixed unless the divider is dragged.
+            property real detailWidth: 240
 
             // Deadline items, re-parsed whenever the model bumps `revision`.
             readonly property var items:
@@ -1955,16 +1996,17 @@ ApplicationWindow {
             }
 
             // ---- Grid mode: month calendar + selected-day list -------
-            SplitView {
+            RowLayout {
+                id: calSplit
                 visible: calendarPane.mode === "grid"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                orientation: Qt.Horizontal
+                spacing: 0
 
                 // Month grid, held to the top so the cells stay compact.
                 ColumnLayout {
-                    SplitView.fillWidth: true
-                    SplitView.minimumWidth: 320
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
                     spacing: 0
 
                 GridLayout {
@@ -2138,11 +2180,45 @@ ApplicationWindow {
                     Item { Layout.fillHeight: true }
                 }
 
+                // ---- Divider: drag to resize the day-detail pane ----
+                Rectangle {
+                    Layout.preferredWidth: 8
+                    Layout.fillHeight: true
+                    color: detailDrag.pressed
+                           ? Qt.rgba(palette.highlight.r, palette.highlight.g,
+                                     palette.highlight.b, 0.5)
+                           : detailDrag.containsMouse
+                           ? Qt.rgba(palette.highlight.r, palette.highlight.g,
+                                     palette.highlight.b, 0.22)
+                           : "transparent"
+                    ToolSeparator {
+                        anchors.centerIn: parent
+                        height: parent.height
+                    }
+                    MouseArea {
+                        id: detailDrag
+                        anchors.fill: parent
+                        anchors.leftMargin: -3
+                        anchors.rightMargin: -3
+                        hoverEnabled: true
+                        cursorShape: Qt.SplitHCursor
+                        property real grabDx: 0
+                        onPressed: grabDx = calSplit.width
+                                   - mapToItem(calSplit, mouseX, 0).x
+                                   - calendarPane.detailWidth
+                        onPositionChanged: if (pressed)
+                            calendarPane.detailWidth = Math.max(180,
+                                Math.min(520, calSplit.width
+                                    - mapToItem(calSplit, mouseX, 0).x - grabDx))
+                    }
+                }
+
                 // Selected-day detail.
                 ColumnLayout {
-                    SplitView.preferredWidth: 240
-                    SplitView.minimumWidth: 180
-                    SplitView.maximumWidth: 460
+                    Layout.preferredWidth: calendarPane.detailWidth
+                    Layout.minimumWidth: calendarPane.detailWidth
+                    Layout.maximumWidth: calendarPane.detailWidth
+                    Layout.fillHeight: true
                     spacing: 6
 
                     Label {
