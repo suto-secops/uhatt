@@ -162,6 +162,40 @@ pub struct TaskNode {
     pub has_children: bool,
     /// Deadline is in the past and the task isn't done.
     pub overdue: bool,
+    /// Last of its parent's (visible) children - its connector is an elbow, not
+    /// a tee. Always true for a root.
+    pub is_last_child: bool,
+    /// Per indent column (`depth` entries), whether a full-height tree guide
+    /// line should be drawn there: `branch_more[i]` is true when the ancestor
+    /// owning column `i` still has siblings below this row.
+    pub branch_more: Vec<bool>,
+}
+
+/// Fill in `is_last_child` / `branch_more` for a pre-ordered, depth-tagged list.
+fn annotate_branches(nodes: &mut [TaskNode]) {
+    let n = nodes.len();
+    // A node is a last child when the next row past its whole subtree is
+    // shallower (or there is none).
+    let mut last = vec![true; n];
+    for k in 0..n {
+        let d = nodes[k].depth;
+        let mut j = k + 1;
+        while j < n && nodes[j].depth > d {
+            j += 1;
+        }
+        last[k] = j == n || nodes[j].depth < d;
+    }
+    // Walk the path stack: `stack[i]` is `is_last_child` of the ancestor at
+    // depth i (or of this node at its own depth). Column i of a row shows a
+    // pipe when the ancestor at depth i+1 is not a last child.
+    let mut stack: Vec<bool> = Vec::new();
+    for k in 0..n {
+        let d = nodes[k].depth as usize;
+        stack.truncate(d);
+        stack.push(last[k]);
+        nodes[k].is_last_child = last[k];
+        nodes[k].branch_more = (0..d).map(|i| !stack[i + 1]).collect();
+    }
 }
 
 fn map_task_node(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskNode> {
@@ -170,6 +204,8 @@ fn map_task_node(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskNode> {
         depth: r.get::<_, i64>(10)? as u32,
         has_children: r.get::<_, i64>(11)? != 0,
         overdue: r.get::<_, i64>(12)? != 0,
+        is_last_child: true,
+        branch_more: Vec::new(),
     })
 }
 
@@ -229,7 +265,9 @@ pub fn list_task_tree(
         Some(id) => stmt.query_map(params![id], map_task_node)?,
         None => stmt.query_map([], map_task_node)?,
     };
-    rows.collect()
+    let mut nodes: Vec<TaskNode> = rows.collect::<rusqlite::Result<_>>()?;
+    annotate_branches(&mut nodes);
+    Ok(nodes)
 }
 
 /// Every completed task as a flat list (depth 0), most-recently-finished first.
@@ -1044,6 +1082,38 @@ mod tests {
                 ("A1a", 2, false),
                 ("A2", 1, false),
                 ("B", 0, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn tree_guide_flags_track_last_child_and_ancestor_branches() {
+        let conn = open_in_memory().unwrap();
+        let a = root(&conn, "A");
+        let a1 = child(&conn, "A1", &a.id);
+        child(&conn, "A1a", &a1.id); // only child of A1
+        child(&conn, "A2", &a.id); // last child of A
+        root(&conn, "B"); // last root
+
+        let tree = list_task_tree(&conn, &ProjectFilter::All, true).unwrap();
+        let by: Vec<_> = tree
+            .iter()
+            .map(|n| {
+                (
+                    n.task.title.as_str(),
+                    n.is_last_child,
+                    n.branch_more.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            by,
+            [
+                ("A", false, vec![]),             // a root with B after it
+                ("A1", false, vec![true]),        // A has A2 after A1 -> col 0 pipes
+                ("A1a", true, vec![true, false]), // under A1 (pipes), itself last
+                ("A2", true, vec![false]),        // last child of A
+                ("B", true, vec![]),              // last root
             ]
         );
     }

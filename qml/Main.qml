@@ -846,10 +846,10 @@ ApplicationWindow {
                 opacity: 0.7
             }
 
-            // ---- Multi-select bar --------------------------------------
+            // ---- Action row: Select toggle + (add task | bulk actions) ----
             RowLayout {
                 Layout.fillWidth: true
-                spacing: 6
+                spacing: 8
 
                 Button {
                     text: tasks.selectionMode ? qsTr("Done") : qsTr("Select")
@@ -857,13 +857,36 @@ ApplicationWindow {
                     checked: tasks.selectionMode
                     onToggled: tasks.selectionMode = checked
                 }
+
+                // --- add a task (hidden while picking / on Finished) ---
+                TextField {
+                    id: input
+                    Layout.fillWidth: true
+                    visible: !tasks.selectionMode && tasks.projectFilter !== "finished"
+                    placeholderText: qsTr("New task, then Enter")
+                    onAccepted: {
+                        tasks.add(text)
+                        text = ""
+                    }
+                }
+                Button {
+                    visible: !tasks.selectionMode && tasks.projectFilter !== "finished"
+                    text: qsTr("Add")
+                    enabled: input.text.trim().length > 0
+                    onClicked: {
+                        tasks.add(input.text)
+                        input.text = ""
+                    }
+                }
+
+                // --- bulk actions (while picking) ---
                 Label {
                     visible: tasks.selectionMode
                     text: qsTr("%1 selected").arg(tasks.selectedCount)
                     font.pointSize: 9
                     opacity: 0.7
                 }
-                Item { Layout.fillWidth: true }
+                Item { Layout.fillWidth: true; visible: tasks.selectionMode }
                 Button {
                     visible: tasks.selectionMode
                     text: qsTr("All")
@@ -883,34 +906,13 @@ ApplicationWindow {
                 }
             }
 
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 8
-                // No adding tasks while looking at the finished list or picking.
-                visible: tasks.projectFilter !== "finished" && !tasks.selectionMode
-
-                TextField {
-                    id: input
-                    Layout.fillWidth: true
-                    placeholderText: qsTr("New task, then Enter")
-                    onAccepted: {
-                        tasks.add(text)
-                        text = ""
-                    }
-                }
-
-                Button {
-                    text: qsTr("Add")
-                    enabled: input.text.trim().length > 0
-                    onClicked: {
-                        tasks.add(input.text)
-                        input.text = ""
-                    }
-                }
-            }
-
             ListView {
                 id: list
+
+                // Which task's info panel is open. Held here, not on the
+                // delegate, so it survives a model reset (e.g. after editing a
+                // deadline) - the panel stays open until the user closes it.
+                property string openTaskId: ""
 
                 Layout.fillWidth: true
                 Layout.fillHeight: true
@@ -932,6 +934,7 @@ ApplicationWindow {
                     required property bool overdue
                     required property string notes
                     required property bool selected
+                    required property string branchMask
 
                     readonly property bool sessionTask: rowItem.id === timer.runningTaskId
                     readonly property bool running: rowItem.sessionTask && !timer.paused
@@ -940,11 +943,12 @@ ApplicationWindow {
                     // Click opens an info panel; renaming is deliberate (double-
                     // click the title, the ⋯ menu, or click the title while the
                     // panel is already open).
-                    property bool infoOpen: false
+                    readonly property bool infoOpen: rowItem.id !== ""
+                                                     && rowItem.id === list.openTaskId
                     property bool editing: false
 
                     function startEdit() {
-                        rowItem.infoOpen = true
+                        list.openTaskId = rowItem.id
                         rowItem.editing = true
                         titleEdit.forceActiveFocus()
                         titleEdit.selectAll()
@@ -957,14 +961,20 @@ ApplicationWindow {
                     }
 
                     width: list.width
-                    leftPadding: 8 + depth * 18
+                    leftPadding: 8
                     opacity: done ? 0.5 : 1.0
 
                     onClicked: {
-                        if (tasks.selectionMode)
+                        if (tasks.selectionMode) {
                             tasks.toggleSelected(rowItem.index)
-                        else if (!rowItem.editing)
-                            rowItem.infoOpen = !rowItem.infoOpen
+                        } else if (rowItem.editing) {
+                            // A click anywhere on the row commits the rename and
+                            // closes the panel in one go.
+                            rowItem.endEdit(true)
+                            list.openTaskId = ""
+                        } else {
+                            list.openTaskId = rowItem.infoOpen ? "" : rowItem.id
+                        }
                     }
                     onInfoOpenChanged: if (rowItem.infoOpen)
                         infoPanel.timeText = tasks.timeInvestedText(rowItem.index)
@@ -973,8 +983,54 @@ ApplicationWindow {
                         spacing: 4
 
                     RowLayout {
+                        id: mainRow
                         Layout.fillWidth: true
                         spacing: 4
+
+                        // Nesting indent with tree guide lines. One column per
+                        // ancestor level; `branchMask` says which run full
+                        // height (branch continues) vs. stop at the connector
+                        // (last child). The deepest column also gets the elbow.
+                        Item {
+                            visible: rowItem.depth > 0
+                            Layout.preferredWidth: rowItem.depth * 18
+                            Layout.fillHeight: true
+
+                            Repeater {
+                                model: rowItem.depth
+                                delegate: Item {
+                                    required property int index
+                                    readonly property bool lastCol: index === rowItem.depth - 1
+                                    readonly property bool pipe:
+                                        rowItem.branchMask.charAt(index) === "1"
+                                    x: index * 18
+                                    width: 18
+                                    height: mainRow.height
+
+                                    Rectangle {
+                                        x: 9
+                                        width: 1
+                                        color: palette.text
+                                        opacity: 0.22
+                                        // Overshoot top/bottom by the inter-row
+                                        // gap so adjacent rows' lines join up.
+                                        y: -4
+                                        height: parent.lastCol
+                                                ? (parent.pipe ? parent.height + 8 : parent.height / 2 + 4)
+                                                : (parent.pipe ? parent.height + 8 : 0)
+                                    }
+                                    Rectangle {
+                                        visible: parent.lastCol
+                                        x: 9
+                                        y: parent.height / 2
+                                        width: 10
+                                        height: 1
+                                        color: palette.text
+                                        opacity: 0.22
+                                    }
+                                }
+                            }
+                        }
 
                         // Multi-select tick (leading), only while picking.
                         CheckBox {
@@ -1033,12 +1089,12 @@ ApplicationWindow {
 
                                 MouseArea {
                                     anchors.fill: parent
-                                    enabled: !rowItem.editing
+                                    enabled: !rowItem.editing && !tasks.selectionMode
                                     onClicked: {
                                         if (rowItem.infoOpen)
                                             rowItem.startEdit()
                                         else
-                                            rowItem.infoOpen = true
+                                            list.openTaskId = rowItem.id
                                     }
                                     onDoubleClicked: rowItem.startEdit()
                                 }
@@ -1178,8 +1234,13 @@ ApplicationWindow {
                         visible: rowItem.infoOpen
                         padding: 8
 
-                        // Refreshed each time the panel opens.
+                        // Recomputed whenever the panel becomes visible - after
+                        // a model reset the delegate is rebuilt from scratch.
                         property string timeText: ""
+                        onVisibleChanged: if (visible)
+                            timeText = tasks.timeInvestedText(rowItem.index)
+                        Component.onCompleted: if (visible)
+                            timeText = tasks.timeInvestedText(rowItem.index)
 
                         contentItem: ColumnLayout {
                             spacing: 6
