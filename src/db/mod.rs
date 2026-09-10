@@ -336,6 +336,43 @@ pub fn list_deadlined_tree(conn: &Connection) -> rusqlite::Result<Vec<TaskNode>>
     Ok(nodes)
 }
 
+/// A task that has a deadline, for the calendar / agenda page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeadlineItem {
+    pub id: String,
+    pub title: String,
+    /// ISO `YYYY-MM-DD`.
+    pub deadline: String,
+    /// Deadline is before local today.
+    pub overdue: bool,
+    /// Owning project's name, or `""` when the task has no project.
+    pub project: String,
+}
+
+/// Every not-done task with a deadline, earliest first (ties broken by title).
+pub fn deadline_items(conn: &Connection) -> rusqlite::Result<Vec<DeadlineItem>> {
+    let sql = format!(
+        "SELECT t.id, t.title, t.deadline,
+                (t.deadline < {TODAY}) AS overdue,
+                COALESCE(p.name, '')
+         FROM tasks t
+         LEFT JOIN projects p ON p.id = t.project_id
+         WHERE t.deadline IS NOT NULL AND t.status <> 'done'
+         ORDER BY t.deadline, t.title COLLATE NOCASE"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |r| {
+        Ok(DeadlineItem {
+            id: r.get(0)?,
+            title: r.get(1)?,
+            deadline: r.get(2)?,
+            overdue: r.get::<_, i64>(3)? != 0,
+            project: r.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
 /// Delete a task; subtasks cascade.
 pub fn delete_task(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
@@ -1233,6 +1270,15 @@ mod tests {
         create_task(conn, title, Some(parent), None).unwrap()
     }
 
+    /// An ISO date `mods` (SQLite date modifiers) away from local today,
+    /// e.g. `date_at(&conn, "'+2 days'")`.
+    fn date_at(conn: &Connection, mods: &str) -> String {
+        conn.query_row(&format!("SELECT date('now','localtime',{mods})"), [], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    }
+
     fn completed_at(conn: &Connection, id: &str) -> Option<String> {
         conn.query_row(
             "SELECT completed_at FROM tasks WHERE id = ?1",
@@ -1428,6 +1474,36 @@ mod tests {
                 ("A1", 1, true, true, false),
                 ("A1a", 2, false, true, false),
                 ("B", 0, false, true, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn deadline_items_lists_dated_open_tasks_in_date_order() {
+        let conn = open_in_memory().unwrap();
+        let past = date_at(&conn, "'-3 days'");
+        let soon = date_at(&conn, "'+2 days'");
+
+        let a = root(&conn, "Zebra");
+        set_task_deadline(&conn, &a.id, Some(&soon)).unwrap();
+        let b = root(&conn, "Apple");
+        set_task_deadline(&conn, &b.id, Some(&past)).unwrap();
+        let c = root(&conn, "no deadline"); // excluded - no deadline
+        let _ = c;
+        let d = root(&conn, "done and dated");
+        set_task_deadline(&conn, &d.id, Some(&soon)).unwrap();
+        set_task_status(&conn, &d.id, TaskStatus::Done).unwrap(); // excluded - done
+
+        let items = deadline_items(&conn).unwrap();
+        let shape: Vec<_> = items
+            .iter()
+            .map(|i| (i.title.as_str(), i.deadline.as_str(), i.overdue))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("Apple", past.as_str(), true),
+                ("Zebra", soon.as_str(), false),
             ]
         );
     }
