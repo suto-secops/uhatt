@@ -13,6 +13,11 @@ ApplicationWindow {
     visible: true
     title: qsTr("uhatt")
 
+    // The current calendar year, for capping the graph's year stepper.
+    function currentYear() {
+        return new Date().getFullYear()
+    }
+
     // Today plus `days`, formatted as an ISO calendar date.
     function isoPlusDays(days) {
         let d = new Date()
@@ -68,97 +73,173 @@ ApplicationWindow {
         title: qsTr("Time invested — %1").arg(subject)
         modal: true
         anchors.centerIn: Overlay.overlay
-        width: 640
-        height: 460
+        width: 800
+        height: 310
         standardButtons: Dialog.Close
 
-        contentItem: ColumnLayout {
-            spacing: 10
+        // Highlight colour at a given 0..1 intensity; the faint "no time" tint
+        // when below the floor.
+        function heat(intensity) {
+            if (intensity < 0.1)
+                return Qt.rgba(palette.text.r, palette.text.g, palette.text.b, 0.08)
+            return Qt.rgba(palette.highlight.r, palette.highlight.g, palette.highlight.b,
+                           0.2 + 0.8 * Math.min(1, intensity))
+        }
 
+        // For each month, the grid column its 1st falls in. The grid starts on
+        // the Monday on-or-before Jan 1, so column = whole weeks from there.
+        function monthColumns() {
+            let y = graph.year
+            let jan1 = new Date(y, 0, 1)
+            let isoDow = (jan1.getDay() + 6) % 7   // Mon=0 .. Sun=6
+            let gridStart = new Date(y, 0, 1 - isoDow)
+            let out = []
+            for (let m = 0; m < 12; m++) {
+                let col = Math.floor((new Date(y, m, 1) - gridStart) / (7 * 86400000))
+                out.push({ name: Qt.locale().standaloneMonthName(m, Locale.ShortFormat), col: col })
+            }
+            return out
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 12
+
+            // ---- Header: total + year stepper ---------------------------
             RowLayout {
                 Layout.fillWidth: true
                 Label {
-                    text: qsTr("Total: %1").arg(graph.totalText)
+                    text: qsTr("Total in %1: %2").arg(graph.year).arg(graph.totalText)
                     font.bold: true
                 }
-                Item {
-                    Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                ToolButton {
+                    text: "‹"
+                    onClicked: graph.year = graph.year - 1
                 }
-                Repeater {
-                    model: [qsTr("Day"), qsTr("Week"), qsTr("Month"), qsTr("Year")]
-                    delegate: Button {
-                        required property int index
-                        required property string modelData
-                        text: modelData
-                        checkable: true
-                        checked: graph.bucket === index
-                        onClicked: graph.bucket = index
-                    }
+                Label {
+                    text: graph.year
+                    font.bold: true
+                    horizontalAlignment: Text.AlignHCenter
+                    Layout.preferredWidth: 48
+                }
+                ToolButton {
+                    text: "›"
+                    enabled: graph.year < root.currentYear()
+                    onClicked: graph.year = graph.year + 1
                 }
             }
 
+            // ---- Heatmap ------------------------------------------------
             Item {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
 
                 Label {
                     anchors.centerIn: parent
-                    visible: barRepeater.count === 0
-                    text: qsTr("No time recorded yet")
+                    visible: graph.maxSeconds <= 0
+                    text: qsTr("No time recorded in %1").arg(graph.year)
                     opacity: 0.5
                 }
 
-                RowLayout {
-                    anchors.fill: parent
-                    spacing: 3
-                    visible: barRepeater.count > 0
+                ColumnLayout {
+                    id: heatBody
+                    anchors.top: parent.top
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.topMargin: 6
+                    visible: graph.maxSeconds > 0
+                    spacing: 6
 
-                    Repeater {
-                        id: barRepeater
-                        model: graph
+                    readonly property int weekdayColWidth: 26
 
-                        delegate: ColumnLayout {
-                            id: bar
-
-                            required property string label
-                            required property real seconds
-                            required property string hoursText
-
-                            Layout.fillWidth: true
-                            Layout.fillHeight: true
-                            spacing: 2
-
-                            Label {
-                                Layout.alignment: Qt.AlignHCenter
-                                text: bar.hoursText
-                                font.pointSize: 8
-                            }
-                            Item {
-                                Layout.fillWidth: true
-                                Layout.fillHeight: true
-                                Rectangle {
-                                    anchors.bottom: parent.bottom
-                                    anchors.horizontalCenter: parent.horizontalCenter
-                                    width: Math.max(6, parent.width * 0.6)
-                                    height: parent.height * (graph.maxSeconds > 0 ? bar.seconds / graph.maxSeconds : 0)
-                                    radius: 2
-                                    color: palette.highlight
-
-                                    HoverHandler {
-                                        id: barHover
-                                    }
-                                    ToolTip.text: bar.label + " · " + bar.hoursText
-                                    ToolTip.visible: barHover.hovered
-                                }
-                            }
-                            Label {
-                                Layout.alignment: Qt.AlignHCenter
-                                Layout.maximumWidth: 72
-                                text: bar.label
+                    // Month labels, positioned over the column of each 1st.
+                    Item {
+                        Layout.leftMargin: heatBody.weekdayColWidth + 4
+                        Layout.preferredWidth: 53 * (heatGrid.cell + heatGrid.columnSpacing)
+                        Layout.preferredHeight: 12
+                        Repeater {
+                            model: graphDialog.monthColumns()
+                            delegate: Label {
+                                required property var modelData
+                                x: modelData.col * (heatGrid.cell + heatGrid.columnSpacing)
+                                text: modelData.name
                                 font.pointSize: 7
-                                elide: Text.ElideRight
+                                opacity: 0.6
                             }
                         }
+                    }
+
+                    RowLayout {
+                        spacing: 4
+
+                        // Weekday labels, aligned to the grid rows.
+                        ColumnLayout {
+                            Layout.preferredWidth: heatBody.weekdayColWidth
+                            spacing: heatGrid.rowSpacing
+                            Repeater {
+                                model: [qsTr("Mon"), "", qsTr("Wed"), "", qsTr("Fri"), "", ""]
+                                delegate: Label {
+                                    required property string modelData
+                                    text: modelData
+                                    font.pointSize: 7
+                                    opacity: 0.6
+                                    Layout.preferredHeight: heatGrid.cell
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+                            }
+                        }
+
+                        // 53 columns x 7 rows, filled column-by-column: the
+                        // model is ordered by week then weekday to match.
+                        Grid {
+                            id: heatGrid
+                            readonly property int cell: 11
+                            rows: 7
+                            flow: Grid.TopToBottom
+                            rowSpacing: 3
+                            columnSpacing: 3
+
+                            Repeater {
+                                model: graph
+                                delegate: Rectangle {
+                                    required property string date
+                                    required property real seconds
+                                    required property string hoursText
+                                    required property bool inYear
+
+                                    width: heatGrid.cell
+                                    height: heatGrid.cell
+                                    radius: 2
+                                    color: !inYear
+                                           ? "transparent"
+                                           : graphDialog.heat(graph.maxSeconds > 0 ? seconds / graph.maxSeconds : 0)
+
+                                    HoverHandler {
+                                        id: cellHover
+                                        enabled: inYear
+                                    }
+                                    ToolTip.visible: cellHover.hovered
+                                    ToolTip.text: date + " · " + hoursText
+                                }
+                            }
+                        }
+                    }
+
+                    // Legend.
+                    RowLayout {
+                        Layout.alignment: Qt.AlignRight
+                        spacing: 4
+                        Label { text: qsTr("Less"); font.pointSize: 7; opacity: 0.6 }
+                        Repeater {
+                            model: [0, 0.35, 0.6, 0.85, 1.0]
+                            delegate: Rectangle {
+                                required property real modelData
+                                width: heatGrid.cell
+                                height: heatGrid.cell
+                                radius: 2
+                                color: graphDialog.heat(modelData)
+                            }
+                        }
+                        Label { text: qsTr("More"); font.pointSize: 7; opacity: 0.6 }
                     }
                 }
             }

@@ -685,28 +685,7 @@ pub fn delete_entry(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
-// --- Time-invested series --------------------------------------------------
-
-/// Calendar bucket for the time-invested graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Bucket {
-    Day,
-    Week,
-    Month,
-    Year,
-}
-
-impl Bucket {
-    /// SQLite expression turning a `start_ts` into this bucket's key.
-    fn key_expr(self) -> &'static str {
-        match self {
-            Bucket::Day => "substr(e.start_ts, 1, 10)", // YYYY-MM-DD
-            Bucket::Week => "strftime('%Y-%W', e.start_ts)", // year-week
-            Bucket::Month => "substr(e.start_ts, 1, 7)", // YYYY-MM
-            Bucket::Year => "substr(e.start_ts, 1, 4)", // YYYY
-        }
-    }
-}
+// --- Time-invested heatmap ------------------------------------------------
 
 /// What the graph is summing over.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -719,24 +698,37 @@ pub enum SeriesTarget {
     TaskSubtree(String),
 }
 
-/// `(bucket key, seconds)` pairs for `target`, oldest first. Only buckets with
-/// recorded time appear; a running timer is not counted.
-pub fn time_series(
+/// One day-cell of the calendar heatmap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeatCell {
+    /// `YYYY-MM-DD`.
+    pub date: String,
+    /// Seconds recorded that day for the target (0 if none).
+    pub seconds: i64,
+    /// False for the leading/trailing pad days borrowed from the adjacent
+    /// years to square off the first and last weeks.
+    pub in_year: bool,
+}
+
+/// Dense day-by-day totals for `target` over the Monday-aligned grid that spans
+/// all of `year`. Always 371 cells (53 weeks x 7 days), ordered by week then
+/// weekday (Mon..Sun), so `cells[i]` sits at column `i / 7`, row `i % 7`. A
+/// running timer is not counted.
+pub fn year_heatmap(
     conn: &Connection,
     target: &SeriesTarget,
-    bucket: Bucket,
-) -> rusqlite::Result<Vec<(String, i64)>> {
-    let key = bucket.key_expr();
-    let (cte, predicate, bind): (&str, &str, Option<&str>) = match target {
+    year: i32,
+) -> rusqlite::Result<Vec<HeatCell>> {
+    let (subtree_cte, predicate, bind): (&str, &str, Option<&str>) = match target {
         SeriesTarget::All => ("", "1", None),
         SeriesTarget::Project(id) => (
             "",
-            "e.task_id IN (SELECT id FROM tasks WHERE project_id = ?1)",
+            "e.task_id IN (SELECT id FROM tasks WHERE project_id = ?2)",
             Some(id.as_str()),
         ),
         SeriesTarget::TaskSubtree(id) => (
-            "WITH RECURSIVE subtree(id) AS (
-                 SELECT ?1
+            ", subtree(id) AS (
+                 SELECT ?2
                UNION ALL
                  SELECT t.id FROM tasks t JOIN subtree s ON t.parent_task_id = s.id
              )",
@@ -744,20 +736,40 @@ pub fn time_series(
             Some(id.as_str()),
         ),
     };
+    // The first Monday on-or-before Jan 1 and the last Sunday on-or-after
+    // Dec 31. `date(X, 'weekday 1', '-7 days')` can't be used - it overshoots a
+    // week when X already is a Monday - so shift by the ISO weekday directly.
     let sql = format!(
-        "{cte}
-         SELECT {key} AS bucket,
-                SUM(strftime('%s', e.end_ts) - strftime('%s', e.start_ts))
-         FROM time_entries e
-         WHERE e.end_ts IS NOT NULL AND {predicate}
-         GROUP BY bucket
-         ORDER BY bucket"
+        "WITH RECURSIVE
+           span(day, last) AS (
+             SELECT date(?1 || '-01-01', '-' || (strftime('%u', ?1 || '-01-01') - 1) || ' days'),
+                    date(?1 || '-12-31', '+' || (7 - strftime('%u', ?1 || '-12-31')) || ' days')
+             UNION ALL
+             SELECT date(day, '+1 day'), last FROM span WHERE day < last
+           ){subtree_cte}
+         SELECT span.day,
+                strftime('%Y', span.day) = ?1 AS in_year,
+                COALESCE(SUM(strftime('%s', e.end_ts) - strftime('%s', e.start_ts)), 0)
+         FROM span
+         LEFT JOIN time_entries e
+                ON substr(e.start_ts, 1, 10) = span.day
+               AND e.end_ts IS NOT NULL
+               AND {predicate}
+         GROUP BY span.day
+         ORDER BY span.day"
     );
+    let year_s = year.to_string();
+    let map_row = |r: &rusqlite::Row<'_>| {
+        Ok(HeatCell {
+            date: r.get(0)?,
+            in_year: r.get::<_, i64>(1)? != 0,
+            seconds: r.get(2)?,
+        })
+    };
     let mut stmt = conn.prepare(&sql)?;
-    let map_row = |r: &rusqlite::Row<'_>| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?));
     let rows = match bind {
-        Some(id) => stmt.query_map(params![id], map_row)?,
-        None => stmt.query_map([], map_row)?,
+        Some(id) => stmt.query_map(params![year_s, id], map_row)?,
+        None => stmt.query_map(params![year_s], map_row)?,
     };
     rows.collect()
 }
@@ -1248,8 +1260,33 @@ mod tests {
         assert_eq!(rows[0].seconds, 0);
     }
 
+    fn day_secs(cells: &[HeatCell], date: &str) -> i64 {
+        cells
+            .iter()
+            .find(|c| c.date == date)
+            .map(|c| c.seconds)
+            .unwrap_or(-1)
+    }
+
     #[test]
-    fn time_series_buckets_and_scopes() {
+    fn year_heatmap_is_a_squared_371_cell_grid() {
+        let conn = open_in_memory().unwrap();
+        let cells = year_heatmap(&conn, &SeriesTarget::All, 2026).unwrap();
+
+        assert_eq!(cells.len(), 371); // always 53 weeks x 7 days
+        assert_eq!(cells.iter().filter(|c| c.in_year).count(), 365); // 2026 is not a leap year
+        assert_eq!(cells.first().unwrap().date, "2025-12-29"); // Monday before Jan 1
+        assert_eq!(cells.last().unwrap().date, "2027-01-03"); // Sunday after Dec 31
+                                                              // Ordered by date, so cells[i] is at column i/7, row i%7.
+        assert!(cells.windows(2).all(|w| w[0].date < w[1].date));
+        // A leap year still squares off to 371 with 366 in-year days.
+        let leap = year_heatmap(&conn, &SeriesTarget::All, 2024).unwrap();
+        assert_eq!(leap.len(), 371);
+        assert_eq!(leap.iter().filter(|c| c.in_year).count(), 366);
+    }
+
+    #[test]
+    fn year_heatmap_scopes_and_counts_by_day() {
         let conn = open_in_memory().unwrap();
         let proj = create_project(&conn, "P").unwrap();
         let parent = create_task(&conn, "parent", None, Some(&proj.id)).unwrap();
@@ -1268,44 +1305,35 @@ mod tests {
         entry(&kid.id, "2026-03-01T14:00:00", "2026-03-01T14:30:00"); // 30m, day 03-01
         entry(&kid.id, "2026-03-05T09:00:00", "2026-03-05T11:00:00"); // 2h,  day 03-05
         entry(&other.id, "2026-03-01T09:00:00", "2026-03-01T12:00:00"); // 3h, other task
+        entry(&kid.id, "2025-12-31T09:00:00", "2025-12-31T10:00:00"); // 1h, a pad day
 
-        // Subtree = parent + kid.
-        let days = time_series(
-            &conn,
-            &SeriesTarget::TaskSubtree(parent.id.clone()),
-            Bucket::Day,
-        )
-        .unwrap();
-        assert_eq!(
-            days,
-            vec![
-                ("2026-03-01".to_owned(), 5400),
-                ("2026-03-05".to_owned(), 7200),
-            ]
-        );
+        // Subtree = parent + kid; `other` is excluded.
+        let sub = year_heatmap(&conn, &SeriesTarget::TaskSubtree(parent.id.clone()), 2026).unwrap();
+        assert_eq!(sub.len(), 371);
+        assert_eq!(day_secs(&sub, "2026-03-01"), 5400);
+        assert_eq!(day_secs(&sub, "2026-03-05"), 7200);
+        assert_eq!(day_secs(&sub, "2026-03-02"), 0); // dense: a quiet day is still a cell
+        assert_eq!(day_secs(&sub, "2025-12-31"), 3600); // pad days carry their totals too
 
-        // Month bucket rolls the two days together.
-        let months =
-            time_series(&conn, &SeriesTarget::TaskSubtree(parent.id), Bucket::Month).unwrap();
-        assert_eq!(months, vec![("2026-03".to_owned(), 12600)]);
+        // Project scope == subtree here (kid inherits P).
+        let proj = year_heatmap(&conn, &SeriesTarget::Project(proj.id), 2026).unwrap();
+        assert_eq!(proj.len(), 371);
+        assert_eq!(day_secs(&proj, "2026-03-01"), 5400);
 
-        // Project scope == subtree here (kid inherits P) and excludes `other`.
-        let proj_days = time_series(&conn, &SeriesTarget::Project(proj.id), Bucket::Day).unwrap();
-        assert_eq!(proj_days.iter().map(|(_, s)| s).sum::<i64>(), 12600);
-
-        // All includes `other`.
-        let all = time_series(&conn, &SeriesTarget::All, Bucket::Day).unwrap();
-        assert_eq!(all.iter().map(|(_, s)| s).sum::<i64>(), 12600 + 10800);
+        // All picks up `other` on top.
+        let all = year_heatmap(&conn, &SeriesTarget::All, 2026).unwrap();
+        assert_eq!(all.len(), 371);
+        assert_eq!(day_secs(&all, "2026-03-01"), 5400 + 10800);
     }
 
     #[test]
-    fn time_series_ignores_running_timer() {
+    fn year_heatmap_ignores_running_timer() {
         let conn = open_in_memory().unwrap();
         let t = root(&conn, "t");
         start_timer(&conn, &t.id).unwrap();
-        assert!(time_series(&conn, &SeriesTarget::All, Bucket::Day)
-            .unwrap()
-            .is_empty());
+        let cells = year_heatmap(&conn, &SeriesTarget::All, 2026).unwrap();
+        assert_eq!(cells.len(), 371);
+        assert!(cells.iter().all(|c| c.seconds == 0));
     }
 
     #[test]
