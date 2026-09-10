@@ -63,6 +63,8 @@ pub mod qobject {
         Overdue,
         /// Free-text notes / description.
         Notes,
+        /// Whether the row is ticked in multi-select mode.
+        Selected,
     }
 
     extern "RustQt" {
@@ -78,6 +80,10 @@ pub mod qobject {
         // Time recorded across every task in the current view's scope, e.g.
         // "18h 40m" ("" while on the finished list). Driven by the model.
         #[qproperty(QString, view_total_text, cxx_name = "viewTotalText")]
+        // Multi-select: while on, rows show a tick box for mass delete / revert.
+        #[qproperty(bool, selection_mode, cxx_name = "selectionMode", READ, WRITE = set_selection_mode, NOTIFY)]
+        // How many rows are ticked. Driven by the model.
+        #[qproperty(i32, selected_count, cxx_name = "selectedCount")]
         type TaskListModel = super::TaskListModelRust;
     }
 
@@ -91,6 +97,36 @@ pub mod qobject {
         /// Toggle whether completed tasks appear in the normal views.
         #[cxx_name = "setShowDone"]
         fn set_show_done(self: Pin<&mut TaskListModel>, value: bool);
+
+        /// Enter / leave multi-select mode (leaving clears the selection).
+        #[cxx_name = "setSelectionMode"]
+        fn set_selection_mode(self: Pin<&mut TaskListModel>, value: bool);
+
+        /// Tick / untick the row at `row`.
+        #[qinvokable]
+        #[cxx_name = "toggleSelected"]
+        fn toggle_selected(self: Pin<&mut TaskListModel>, row: i32);
+
+        /// Tick every visible row.
+        #[qinvokable]
+        #[cxx_name = "selectAll"]
+        fn select_all(self: Pin<&mut TaskListModel>);
+
+        /// Untick everything.
+        #[qinvokable]
+        #[cxx_name = "clearSelection"]
+        fn clear_selection(self: Pin<&mut TaskListModel>);
+
+        /// Delete every ticked task (subtasks cascade), then leave select mode.
+        #[qinvokable]
+        #[cxx_name = "deleteSelected"]
+        fn delete_selected(self: Pin<&mut TaskListModel>);
+
+        /// Mark every ticked task not-done (it returns to its project), then
+        /// leave select mode.
+        #[qinvokable]
+        #[cxx_name = "revertSelected"]
+        fn revert_selected(self: Pin<&mut TaskListModel>);
 
         /// Append a new root task in the current project filter (if any). No-op on blank input.
         #[qinvokable]
@@ -186,6 +222,12 @@ pub struct TaskListModelRust {
     show_done: bool,
     /// Backs the `viewTotalText` Q_PROPERTY.
     view_total_text: QString,
+    /// Backs the `selectionMode` Q_PROPERTY.
+    selection_mode: bool,
+    /// Backs the `selectedCount` Q_PROPERTY.
+    selected_count: i32,
+    /// Task ids ticked in multi-select mode.
+    selected: HashSet<String>,
     tree: Vec<TaskNode>,
     collapsed: HashSet<String>,
     /// Indices into `tree` that are currently visible, in display order.
@@ -302,6 +344,13 @@ impl qobject::TaskListModel {
             .filter(|id| live.contains(id.as_str()))
             .cloned()
             .collect();
+        let selected: HashSet<String> = self
+            .selected
+            .iter()
+            .filter(|id| live.contains(id.as_str()))
+            .cloned()
+            .collect();
+        let selected_count = selected.len() as i32;
         let visible = compute_visible(&tree, &collapsed);
         // SAFETY: begin/end are paired around the state swap.
         unsafe {
@@ -310,12 +359,14 @@ impl qobject::TaskListModel {
                 let mut rust = self.as_mut().rust_mut();
                 rust.tree = tree;
                 rust.collapsed = collapsed;
+                rust.selected = selected;
                 rust.visible = visible;
             }
             self.as_mut().end_reset_model();
         }
         self.as_mut()
             .set_view_total_text(QString::from(view_total.as_str()));
+        self.as_mut().set_selected_count(selected_count);
     }
 
     fn set_project_filter(mut self: Pin<&mut Self>, value: QString) {
@@ -336,6 +387,98 @@ impl qobject::TaskListModel {
         }
         self.as_mut().rust_mut().show_done = value;
         self.as_mut().show_done_changed();
+        self.reload();
+    }
+
+    // ---- Multi-select ---------------------------------------------------
+
+    /// Reset the model around a change to the selection set, then republish
+    /// `selectedCount`. No SQLite read - the tree is untouched.
+    fn selection_changed(mut self: Pin<&mut Self>) {
+        let count = self.selected.len() as i32;
+        // SAFETY: begin/end are paired; `data()` reads `selected` for its role.
+        unsafe {
+            self.as_mut().begin_reset_model();
+            self.as_mut().end_reset_model();
+        }
+        self.as_mut().set_selected_count(count);
+    }
+
+    fn set_selection_mode(mut self: Pin<&mut Self>, value: bool) {
+        if self.selection_mode == value {
+            return;
+        }
+        {
+            let mut rust = self.as_mut().rust_mut();
+            rust.selection_mode = value;
+            if !value {
+                rust.selected.clear();
+            }
+        }
+        self.as_mut().selection_mode_changed();
+        self.as_mut().selection_changed();
+    }
+
+    fn toggle_selected(mut self: Pin<&mut Self>, row: i32) {
+        let Some(id) = self.id_at(row) else {
+            return;
+        };
+        {
+            let mut rust = self.as_mut().rust_mut();
+            if !rust.selected.remove(&id) {
+                rust.selected.insert(id);
+            }
+        }
+        self.as_mut().selection_changed();
+    }
+
+    fn select_all(mut self: Pin<&mut Self>) {
+        let ids: Vec<String> = self
+            .visible
+            .iter()
+            .filter_map(|&i| self.tree.get(i))
+            .map(|n| n.task.id.clone())
+            .collect();
+        self.as_mut().rust_mut().selected.extend(ids);
+        self.as_mut().selection_changed();
+    }
+
+    fn clear_selection(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().selected.clear();
+        self.as_mut().selection_changed();
+    }
+
+    fn delete_selected(mut self: Pin<&mut Self>) {
+        let ids: Vec<String> = self.selected.iter().cloned().collect();
+        for id in &ids {
+            if let Err(e) = db::delete_task(self.db_conn(), id) {
+                eprintln!("uhatt: bulk delete failed for {id}: {e}");
+            }
+        }
+        {
+            let mut rust = self.as_mut().rust_mut();
+            rust.selected.clear();
+            rust.selection_mode = false;
+        }
+        self.as_mut().selection_mode_changed();
+        self.as_mut().set_selected_count(0);
+        self.reload();
+    }
+
+    fn revert_selected(mut self: Pin<&mut Self>) {
+        let ids: Vec<String> = self.selected.iter().cloned().collect();
+        for id in &ids {
+            if let Err(e) = db::set_task_status(self.db_conn(), id, TaskStatus::Todo) {
+                eprintln!("uhatt: bulk revert failed for {id}: {e}");
+            }
+        }
+        {
+            let mut rust = self.as_mut().rust_mut();
+            rust.selected.clear();
+            rust.selection_mode = false;
+        }
+        self.as_mut().selection_mode_changed();
+        self.as_mut().set_selected_count(0);
         self.reload();
     }
 
@@ -516,6 +659,7 @@ impl qobject::TaskListModel {
             }
             qobject::TaskRole::Overdue => QVariant::from(&node.overdue),
             qobject::TaskRole::Notes => QVariant::from(&QString::from(task.notes.as_str())),
+            qobject::TaskRole::Selected => QVariant::from(&self.selected.contains(&task.id)),
             _ => QVariant::default(),
         }
     }
@@ -540,6 +684,10 @@ impl qobject::TaskListModel {
         );
         roles.insert(qobject::TaskRole::Overdue.repr, QByteArray::from("overdue"));
         roles.insert(qobject::TaskRole::Notes.repr, QByteArray::from("notes"));
+        roles.insert(
+            qobject::TaskRole::Selected.repr,
+            QByteArray::from("selected"),
+        );
         roles
     }
 

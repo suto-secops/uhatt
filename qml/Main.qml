@@ -846,11 +846,48 @@ ApplicationWindow {
                 opacity: 0.7
             }
 
+            // ---- Multi-select bar --------------------------------------
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 6
+
+                Button {
+                    text: tasks.selectionMode ? qsTr("Done") : qsTr("Select")
+                    checkable: true
+                    checked: tasks.selectionMode
+                    onToggled: tasks.selectionMode = checked
+                }
+                Label {
+                    visible: tasks.selectionMode
+                    text: qsTr("%1 selected").arg(tasks.selectedCount)
+                    font.pointSize: 9
+                    opacity: 0.7
+                }
+                Item { Layout.fillWidth: true }
+                Button {
+                    visible: tasks.selectionMode
+                    text: qsTr("All")
+                    onClicked: tasks.selectAll()
+                }
+                Button {
+                    visible: tasks.selectionMode && tasks.projectFilter === "finished"
+                    enabled: tasks.selectedCount > 0
+                    text: qsTr("Revert")
+                    onClicked: tasks.revertSelected()
+                }
+                Button {
+                    visible: tasks.selectionMode
+                    enabled: tasks.selectedCount > 0
+                    text: qsTr("Delete")
+                    onClicked: tasks.deleteSelected()
+                }
+            }
+
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 8
-                // No adding tasks while looking at the finished list.
-                visible: tasks.projectFilter !== "finished"
+                // No adding tasks while looking at the finished list or picking.
+                visible: tasks.projectFilter !== "finished" && !tasks.selectionMode
 
                 TextField {
                     id: input
@@ -894,6 +931,7 @@ ApplicationWindow {
                     required property string deadline
                     required property bool overdue
                     required property string notes
+                    required property bool selected
 
                     readonly property bool sessionTask: rowItem.id === timer.runningTaskId
                     readonly property bool running: rowItem.sessionTask && !timer.paused
@@ -922,7 +960,12 @@ ApplicationWindow {
                     leftPadding: 8 + depth * 18
                     opacity: done ? 0.5 : 1.0
 
-                    onClicked: if (!rowItem.editing) rowItem.infoOpen = !rowItem.infoOpen
+                    onClicked: {
+                        if (tasks.selectionMode)
+                            tasks.toggleSelected(rowItem.index)
+                        else if (!rowItem.editing)
+                            rowItem.infoOpen = !rowItem.infoOpen
+                    }
                     onInfoOpenChanged: if (rowItem.infoOpen)
                         infoPanel.timeText = tasks.timeInvestedText(rowItem.index)
 
@@ -932,6 +975,14 @@ ApplicationWindow {
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: 4
+
+                        // Multi-select tick (leading), only while picking.
+                        CheckBox {
+                            visible: tasks.selectionMode
+                            padding: 0
+                            checked: rowItem.selected
+                            onToggled: tasks.toggleSelected(rowItem.index)
+                        }
 
                         // Expand/collapse control. A plain Label + TapHandler rather than
                         // a Button: Button styles add unpredictable padding that clipped
@@ -1297,6 +1348,14 @@ ApplicationWindow {
                         }
 
                         MenuSeparator {}
+                        MenuItem {
+                            // Un-finish: the task keeps its project, so it
+                            // reappears there.
+                            text: qsTr("Revert to not done")
+                            visible: rowItem.done
+                            height: visible ? implicitHeight : 0
+                            onTriggered: tasks.setDone(rowItem.index, false)
+                        }
                         MenuItem {
                             text: qsTr("Delete")
                             onTriggered: tasks.remove(rowItem.index)
