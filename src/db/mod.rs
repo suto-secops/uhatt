@@ -380,6 +380,21 @@ fn and_then(head: String, n: i64, unit: &str) -> String {
     }
 }
 
+/// `value` in `unit`, rounded to two decimals: a whole number keeps the
+/// integer wording (`"3 weeks"`), a fraction is spelled out (`"0.25 months"`,
+/// `"1.5 weeks"`). Used for the fixed-unit deadline countdown so a task less
+/// than one unit away no longer collapses to `"0 units"`.
+fn decimal(value: f64, unit: &str) -> String {
+    let rounded = (value * 100.0).round() / 100.0;
+    if rounded == rounded.trunc() {
+        return plural(rounded as i64, unit);
+    }
+    let text = format!("{rounded:.2}");
+    // "1.50" -> "1.5", but "0.25" stays put (strip at most one zero).
+    let text = text.strip_suffix('0').unwrap_or(&text);
+    format!("{text} {unit}s")
+}
+
 /// Whole calendar months from local today up to (not past) `deadline`.
 fn whole_months(conn: &Connection, deadline: &str) -> rusqlite::Result<i64> {
     conn.query_row(
@@ -427,8 +442,29 @@ pub fn deadline_countdown(
             1 => "tomorrow".to_owned(),
             _ => plural(days, "day"),
         },
-        CountdownMode::Weeks => plural(days / 7, "week"),
-        CountdownMode::Months => plural(whole_months(conn, deadline)?, "month"),
+        CountdownMode::Weeks => match days {
+            0 => "today".to_owned(),
+            _ => decimal(days as f64 / 7.0, "week"),
+        },
+        CountdownMode::Months => match days {
+            0 => "today".to_owned(),
+            _ => {
+                // whole calendar months, then the leftover days as a fraction
+                // of the month they fall in.
+                let whole = whole_months(conn, deadline)?;
+                let (rem_days, month_len): (f64, f64) = conn.query_row(
+                    &format!(
+                        "SELECT julianday(date(?1))
+                                  - julianday(date({TODAY}, '+' || ?2 || ' months')),
+                                julianday(date({TODAY}, '+' || (?2 + 1) || ' months'))
+                                  - julianday(date({TODAY}, '+' || ?2 || ' months'))"
+                    ),
+                    params![deadline, whole],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                decimal(whole as f64 + rem_days / month_len, "month")
+            }
+        },
         CountdownMode::Optimal => match days {
             0 => "today".to_owned(),
             1 => "tomorrow".to_owned(),
@@ -1281,6 +1317,15 @@ mod tests {
         assert_eq!(cd(&at("'+21 days'"), Weeks), "3 weeks");
         assert_eq!(cd(&at("'+2 days'"), Hours), "48 hours");
         assert_eq!(cd(&at("'-2 days'"), Days), "overdue by 2 days");
+
+        // Fixed unit, less than one unit away: a fraction, not "0".
+        assert_eq!(cd(&at("'+5 days'"), Weeks), "0.71 weeks");
+        assert_eq!(cd(&at("'+0 days'"), Weeks), "today");
+        assert_eq!(cd(&at("'+0 days'"), Months), "today");
+        let m = cd(&at("'+10 days'"), Months);
+        assert!(m.starts_with("0.3") && m.ends_with(" months"), "got {m}");
+        // A whole count still reads as an integer.
+        assert_eq!(cd(&at("'+14 days'"), Weeks), "2 weeks");
 
         assert_eq!(cd(&at("'+3 days'"), Optimal), "3 days");
         assert_eq!(cd(&at("'+8 days'"), Optimal), "1 week and 1 day");
