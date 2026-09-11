@@ -11,6 +11,7 @@ fn main() {
             "src/settings.rs",
             "src/calendar.rs",
             "src/actions_log.rs",
+            "src/quick_create.rs",
         ])
         .build();
 }

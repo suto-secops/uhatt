@@ -120,9 +120,6 @@ pub struct TimeEntry {
 /// Parse a duration like `"2h"`, `"45m"`, `"2h30m"`, `"2h 30m"`, `"1.5h"` into
 /// whole seconds. A bare number with no unit is rejected - it's genuinely
 /// ambiguous (minutes? hours?) and this format fails loud, not silently.
-// TODO(quick-creation UI): wired up by the Quick Creation page (next PR);
-// exercised by tests until then, so an explicit allow beats a dead-code warning.
-#[allow(dead_code)]
 pub fn parse_duration(s: &str) -> Result<i64, String> {
     let s = s.trim();
     if s.is_empty() {
@@ -165,7 +162,6 @@ pub fn parse_duration(s: &str) -> Result<i64, String> {
 }
 
 /// True for a structurally valid `YYYY-MM-DD` calendar date string.
-#[allow(dead_code)]
 fn is_iso_date(s: &str) -> bool {
     let b = s.as_bytes();
     b.len() == 10
@@ -181,7 +177,6 @@ fn is_iso_date(s: &str) -> bool {
 /// ISO `YYYY-MM-DD`. Mirrors the QML-side `parseDate` used by the deadline
 /// popup, duplicated here so quick-creation parsing doesn't need a live
 /// `Settings` object.
-#[allow(dead_code)]
 pub fn parse_date_with_format(s: &str, format: i32) -> Option<String> {
     let s = s.trim();
     if format == 0 {
@@ -203,7 +198,6 @@ pub fn parse_date_with_format(s: &str, format: i32) -> Option<String> {
 }
 
 /// `true` for an empty field or an explicit "na" / "n/a" marker.
-#[allow(dead_code)]
 fn is_blank_field(s: &str) -> bool {
     let s = s.trim();
     s.is_empty() || s.eq_ignore_ascii_case("na") || s.eq_ignore_ascii_case("n/a")
@@ -211,7 +205,6 @@ fn is_blank_field(s: &str) -> bool {
 
 /// One successfully parsed task line from quick-creation input.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub struct QuickCreateTask {
     /// Nesting depth, 0 = root.
     pub depth: usize,
@@ -225,7 +218,6 @@ pub struct QuickCreateTask {
 /// One line of quick-creation input, parsed or not. `line_no` is 1-based
 /// against the original pasted text, for error display.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub struct QuickCreateLine {
     pub line_no: usize,
     pub result: Result<QuickCreateTask, String>,
@@ -233,7 +225,6 @@ pub struct QuickCreateLine {
 
 /// Parse one line's `title|time|deadline|description` content (indentation
 /// already stripped) into a task, or an error message.
-#[allow(dead_code)]
 fn parse_task_fields(content: &str, date_format: i32) -> Result<QuickCreateTask, String> {
     let parts: Vec<&str> = content.splitn(4, '|').collect();
     let [title, time, deadline, description] = parts[..] else {
@@ -274,7 +265,6 @@ fn parse_task_fields(content: &str, date_format: i32) -> Result<QuickCreateTask,
 
 /// Leading run of `indent_char`, or an error if it's mixed with the other
 /// whitespace character (the classic pasted-from-elsewhere footgun).
-#[allow(dead_code)]
 fn leading_indent(line: &str, indent_char: char) -> Result<usize, String> {
     let other = if indent_char == ' ' { '\t' } else { ' ' };
     let mut n = 0;
@@ -296,7 +286,6 @@ fn leading_indent(line: &str, indent_char: char) -> Result<usize, String> {
 /// Parse the whole quick-creation text area into one entry per non-blank
 /// line - each either a task (with `depth` resolved from indentation) or a
 /// line-level error. Blank lines are silently skipped.
-#[allow(dead_code)]
 pub fn parse_quick_creation(
     text: &str,
     indent_char: char,
