@@ -83,6 +83,8 @@ struct ActionJson<'a> {
     summary: &'a str,
     #[serde(rename = "createdAt")]
     created_at: &'a str,
+    #[serde(rename = "projectLabel")]
+    project_label: &'a str,
 }
 
 impl qobject::ActionsLog {
@@ -112,6 +114,7 @@ impl qobject::ActionsLog {
                 id: a.id,
                 summary: &a.summary,
                 created_at: &a.created_at,
+                project_label: &a.project_label,
             })
             .collect();
         let json = serde_json::to_string(&out).unwrap_or_else(|_| "[]".to_owned());
