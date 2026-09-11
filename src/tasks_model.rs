@@ -181,6 +181,12 @@ pub mod qobject {
         #[cxx_name = "timeInvestedText"]
         fn time_invested_text(self: &TaskListModel, row: i32) -> QString;
 
+        /// The task at `row`'s one-off starting duration (set by quick
+        /// creation), formatted, or "" when it has none.
+        #[qinvokable]
+        #[cxx_name = "initialTimeText"]
+        fn initial_time_text(self: &TaskListModel, row: i32) -> QString;
+
         /// Set the task's deadline to an ISO `YYYY-MM-DD` date, or clear it when
         /// `deadline` is empty. Malformed dates are ignored.
         #[qinvokable]
@@ -752,6 +758,18 @@ impl qobject::TaskListModel {
         } else {
             human_hm(own)
         };
+        QString::from(text.as_str())
+    }
+
+    /// The task at `row`'s one-off starting duration (`Task.initial_time_seconds`),
+    /// formatted, or "" when unset. Never counted in `time_invested_text` or
+    /// any graph total.
+    fn initial_time_text(&self, row: i32) -> QString {
+        let text = self
+            .node_at(row)
+            .and_then(|n| n.task.initial_time_seconds)
+            .map(human_hm)
+            .unwrap_or_default();
         QString::from(text.as_str())
     }
 

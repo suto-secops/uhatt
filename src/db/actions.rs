@@ -247,9 +247,10 @@ struct TaskSnapshot {
     deadline: Option<String>,
     tracked: bool,
     status: String,
-    completed_at: Option<String>,
     sort_order: f64,
     created_at: String,
+    initial_time_seconds: Option<i64>,
+    completed_at: Option<String>,
 }
 
 // `SELECT {TASK_COLUMNS}, completed_at` - TASK_COLUMNS' own order (see
@@ -266,7 +267,8 @@ fn row_to_task_snapshot(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskSnapshot>
         status: r.get(7)?,
         sort_order: r.get(8)?,
         created_at: r.get(9)?,
-        completed_at: r.get(10)?,
+        initial_time_seconds: r.get(10)?,
+        completed_at: r.get(11)?,
     })
 }
 
@@ -465,8 +467,9 @@ fn apply_one(conn: &Connection, action_id: i64) -> rusqlite::Result<()> {
                 };
                 conn.execute(
                     "INSERT INTO tasks (id, parent_task_id, project_id, title, notes, deadline,
-                                         tracked, status, completed_at, sort_order, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                                         tracked, status, completed_at, sort_order, created_at,
+                                         initial_time_seconds)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                     params![
                         t.id,
                         parent,
@@ -479,6 +482,7 @@ fn apply_one(conn: &Connection, action_id: i64) -> rusqlite::Result<()> {
                         t.completed_at,
                         t.sort_order,
                         t.created_at,
+                        t.initial_time_seconds,
                     ],
                 )?;
             }

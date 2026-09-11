@@ -6,7 +6,7 @@
 
 use rusqlite::Connection;
 
-pub const MIGRATIONS: &[&str] = &[V1, V2, V3];
+pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
 
 /// Number of migration steps the code expects the database to be at.
 pub const COUNT: usize = MIGRATIONS.len();
@@ -104,4 +104,12 @@ CREATE TABLE actions (
     payload     TEXT NOT NULL,
     created_at  TEXT NOT NULL
 );
+"#;
+
+// A task created through the "quick creation" bulk text import can carry a
+// one-off starting duration ("I've already put 3h into this"). It is display
+// only - never summed into time totals or the heatmap, never backed by a
+// time_entries row - so a plain nullable column is all it needs.
+const V4: &str = r#"
+ALTER TABLE tasks ADD COLUMN initial_time_seconds INTEGER;
 "#;

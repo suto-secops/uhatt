@@ -32,6 +32,12 @@ pub mod qobject {
         #[qproperty(bool, calendar_show_task_count, cxx_name = "calendarShowTaskCount", READ, WRITE = set_calendar_show_task_count, NOTIFY)]
         // How a deadline is displayed/typed: 0 YYYY-MM-DD, 1 MM/DD/YYYY, 2 DD/MM/YYYY.
         #[qproperty(i32, date_format, cxx_name = "dateFormat", READ, WRITE = set_date_format, NOTIFY)]
+        // Quick creation: one level of task nesting is one Tab character
+        // when true, one space when false (default).
+        #[qproperty(bool, quick_create_indent_tab, cxx_name = "quickCreateIndentTab", READ, WRITE = set_quick_create_indent_tab, NOTIFY)]
+        // Show the "Initial time" row (set by quick creation) on a task's
+        // info panel. Doesn't affect whether it's captured on import.
+        #[qproperty(bool, show_initial_time, cxx_name = "showInitialTime", READ, WRITE = set_show_initial_time, NOTIFY)]
         type Settings = super::SettingsRust;
     }
 
@@ -53,6 +59,12 @@ pub mod qobject {
         #[cxx_name = "setDateFormat"]
         fn set_date_format(self: Pin<&mut Settings>, value: i32);
 
+        #[cxx_name = "setQuickCreateIndentTab"]
+        fn set_quick_create_indent_tab(self: Pin<&mut Settings>, value: bool);
+
+        #[cxx_name = "setShowInitialTime"]
+        fn set_show_initial_time(self: Pin<&mut Settings>, value: bool);
+
         /// "time left until `iso_date`" per the current setting; "" when the
         /// countdown is off or the date can't be read.
         #[qinvokable]
@@ -69,6 +81,8 @@ pub struct SettingsRust {
     calendar_hide_other_month: bool,
     calendar_show_task_count: bool,
     date_format: i32,
+    quick_create_indent_tab: bool,
+    show_initial_time: bool,
 }
 
 impl Default for SettingsRust {
@@ -83,6 +97,8 @@ impl Default for SettingsRust {
             calendar_hide_other_month: false,
             calendar_show_task_count: true,
             date_format: 0,
+            quick_create_indent_tab: false,
+            show_initial_time: true,
         }
     }
 }
@@ -93,6 +109,8 @@ const CROSS_PAST_KEY: &str = "calendar_cross_past";
 const HIDE_OTHER_MONTH_KEY: &str = "calendar_hide_other_month";
 const SHOW_TASK_COUNT_KEY: &str = "calendar_show_task_count";
 const DATE_FORMAT_KEY: &str = "date_format";
+const QUICK_CREATE_INDENT_TAB_KEY: &str = "quick_create_indent_tab";
+const SHOW_INITIAL_TIME_KEY: &str = "show_initial_time";
 
 fn mode_of(value: i32) -> CountdownMode {
     match value {
@@ -127,6 +145,8 @@ impl cxx_qt::Initialize for qobject::Settings {
             .flatten()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
+        let quick_create_indent_tab = read_bool(&conn, QUICK_CREATE_INDENT_TAB_KEY, false);
+        let show_initial_time = read_bool(&conn, SHOW_INITIAL_TIME_KEY, true);
         {
             let mut rust = self.as_mut().rust_mut();
             rust.conn = Some(conn);
@@ -135,6 +155,8 @@ impl cxx_qt::Initialize for qobject::Settings {
             rust.calendar_hide_other_month = hide_other_month;
             rust.calendar_show_task_count = show_task_count;
             rust.date_format = date_format;
+            rust.quick_create_indent_tab = quick_create_indent_tab;
+            rust.show_initial_time = show_initial_time;
         }
     }
 }
@@ -212,6 +234,24 @@ impl qobject::Settings {
             eprintln!("uhatt: could not save setting: {e}");
         }
         self.as_mut().date_format_changed();
+    }
+
+    fn set_quick_create_indent_tab(mut self: Pin<&mut Self>, value: bool) {
+        if self.quick_create_indent_tab == value {
+            return;
+        }
+        self.as_mut().rust_mut().quick_create_indent_tab = value;
+        persist_bool(self.db_conn(), QUICK_CREATE_INDENT_TAB_KEY, value);
+        self.as_mut().quick_create_indent_tab_changed();
+    }
+
+    fn set_show_initial_time(mut self: Pin<&mut Self>, value: bool) {
+        if self.show_initial_time == value {
+            return;
+        }
+        self.as_mut().rust_mut().show_initial_time = value;
+        persist_bool(self.db_conn(), SHOW_INITIAL_TIME_KEY, value);
+        self.as_mut().show_initial_time_changed();
     }
 
     fn countdown_text(&self, iso_date: &QString) -> QString {

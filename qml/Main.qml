@@ -660,6 +660,7 @@ ApplicationWindow {
         // reasonable dialog height, rather than a hand-tuned fixed height
         // that needs bumping every time a group is added.
         contentItem: ScrollView {
+            id: settingsScroll
             clip: true
             contentWidth: availableWidth
 
@@ -869,6 +870,63 @@ ApplicationWindow {
                     Switch {
                         checked: settings.calendarShowTaskCount
                         onToggled: settings.calendarShowTaskCount = checked
+                    }
+                }
+            }
+
+            // ---- Quick creation group ----
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 2
+
+                Label {
+                    text: qsTr("Quick creation")
+                    font.bold: true
+                }
+                Label {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 8
+                    text: qsTr("One level of task nesting in the pasted text is:")
+                    wrapMode: Text.WordWrap
+                }
+                Flow {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 8
+                    Layout.topMargin: 4
+                    spacing: 6
+                    Button {
+                        text: qsTr("One space")
+                        checkable: true
+                        checked: !settings.quickCreateIndentTab
+                        onClicked: settings.quickCreateIndentTab = false
+                    }
+                    Button {
+                        text: qsTr("One tab")
+                        checkable: true
+                        checked: settings.quickCreateIndentTab
+                        onClicked: settings.quickCreateIndentTab = true
+                    }
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 8
+                    Layout.topMargin: 6
+                    spacing: 10
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 2
+                        Label { text: qsTr("Show the “Initial time” field") }
+                        Label {
+                            Layout.fillWidth: true
+                            text: qsTr("A one-off starting duration set by quick creation, shown on the task's info panel. Never counted in time totals or the graph.")
+                            font.pointSize: 8
+                            opacity: 0.6
+                            wrapMode: Text.WordWrap
+                        }
+                    }
+                    Switch {
+                        checked: settings.showInitialTime
+                        onToggled: settings.showInitialTime = checked
                     }
                 }
             }
@@ -1581,10 +1639,15 @@ ApplicationWindow {
                         // Recomputed whenever the panel becomes visible - after
                         // a model reset the delegate is rebuilt from scratch.
                         property string timeText: ""
-                        onVisibleChanged: if (visible)
+                        property string initialTimeText: ""
+                        onVisibleChanged: if (visible) {
                             timeText = tasks.timeInvestedText(rowItem.index)
-                        Component.onCompleted: if (visible)
+                            initialTimeText = tasks.initialTimeText(rowItem.index)
+                        }
+                        Component.onCompleted: if (visible) {
                             timeText = tasks.timeInvestedText(rowItem.index)
+                            initialTimeText = tasks.initialTimeText(rowItem.index)
+                        }
 
                         contentItem: ColumnLayout {
                             spacing: 6
@@ -1598,6 +1661,21 @@ ApplicationWindow {
                                 }
                                 Label {
                                     text: infoPanel.timeText
+                                    font.pointSize: 9
+                                }
+                                Item { Layout.fillWidth: true }
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                visible: settings.showInitialTime && infoPanel.initialTimeText !== ""
+                                Label {
+                                    text: qsTr("Initial time:")
+                                    font.pointSize: 9
+                                    opacity: 0.7
+                                }
+                                Label {
+                                    text: infoPanel.initialTimeText
                                     font.pointSize: 9
                                 }
                                 Item { Layout.fillWidth: true }
