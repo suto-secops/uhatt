@@ -30,6 +30,8 @@ pub mod qobject {
         #[qproperty(bool, calendar_hide_other_month, cxx_name = "calendarHideOtherMonth", READ, WRITE = set_calendar_hide_other_month, NOTIFY)]
         // Calendar page: show the per-day "TC: N" task-count badge.
         #[qproperty(bool, calendar_show_task_count, cxx_name = "calendarShowTaskCount", READ, WRITE = set_calendar_show_task_count, NOTIFY)]
+        // How a deadline is displayed/typed: 0 YYYY-MM-DD, 1 MM/DD/YYYY, 2 DD/MM/YYYY.
+        #[qproperty(i32, date_format, cxx_name = "dateFormat", READ, WRITE = set_date_format, NOTIFY)]
         type Settings = super::SettingsRust;
     }
 
@@ -48,6 +50,9 @@ pub mod qobject {
         #[cxx_name = "setCalendarShowTaskCount"]
         fn set_calendar_show_task_count(self: Pin<&mut Settings>, value: bool);
 
+        #[cxx_name = "setDateFormat"]
+        fn set_date_format(self: Pin<&mut Settings>, value: i32);
+
         /// "time left until `iso_date`" per the current setting; "" when the
         /// countdown is off or the date can't be read.
         #[qinvokable]
@@ -63,6 +68,7 @@ pub struct SettingsRust {
     calendar_cross_past: bool,
     calendar_hide_other_month: bool,
     calendar_show_task_count: bool,
+    date_format: i32,
 }
 
 impl Default for SettingsRust {
@@ -76,6 +82,7 @@ impl Default for SettingsRust {
             calendar_cross_past: true,
             calendar_hide_other_month: false,
             calendar_show_task_count: true,
+            date_format: 0,
         }
     }
 }
@@ -85,6 +92,7 @@ const COUNTDOWN_KEY: &str = "deadline_countdown";
 const CROSS_PAST_KEY: &str = "calendar_cross_past";
 const HIDE_OTHER_MONTH_KEY: &str = "calendar_hide_other_month";
 const SHOW_TASK_COUNT_KEY: &str = "calendar_show_task_count";
+const DATE_FORMAT_KEY: &str = "date_format";
 
 fn mode_of(value: i32) -> CountdownMode {
     match value {
@@ -114,6 +122,11 @@ impl cxx_qt::Initialize for qobject::Settings {
         let cross_past = read_bool(&conn, CROSS_PAST_KEY, true);
         let hide_other_month = read_bool(&conn, HIDE_OTHER_MONTH_KEY, false);
         let show_task_count = read_bool(&conn, SHOW_TASK_COUNT_KEY, true);
+        let date_format = db::get_meta(&conn, DATE_FORMAT_KEY)
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         {
             let mut rust = self.as_mut().rust_mut();
             rust.conn = Some(conn);
@@ -121,6 +134,7 @@ impl cxx_qt::Initialize for qobject::Settings {
             rust.calendar_cross_past = cross_past;
             rust.calendar_hide_other_month = hide_other_month;
             rust.calendar_show_task_count = show_task_count;
+            rust.date_format = date_format;
         }
     }
 }
@@ -186,6 +200,18 @@ impl qobject::Settings {
         self.as_mut().rust_mut().calendar_show_task_count = value;
         persist_bool(self.db_conn(), SHOW_TASK_COUNT_KEY, value);
         self.as_mut().calendar_show_task_count_changed();
+    }
+
+    fn set_date_format(mut self: Pin<&mut Self>, value: i32) {
+        let value = value.clamp(0, 2);
+        if self.date_format == value {
+            return;
+        }
+        self.as_mut().rust_mut().date_format = value;
+        if let Err(e) = db::set_meta(self.db_conn(), DATE_FORMAT_KEY, &value.to_string()) {
+            eprintln!("uhatt: could not save setting: {e}");
+        }
+        self.as_mut().date_format_changed();
     }
 
     fn countdown_text(&self, iso_date: &QString) -> QString {
