@@ -20,6 +20,63 @@ ApplicationWindow {
         return Qt.formatDate(d, "yyyy-MM-dd")
     }
 
+    // ---- Date format (settings.dateFormat: 0 ISO, 1 US, 2 EU) -----------
+    // Display and input for deadlines follow the user's choice; everything
+    // is still stored and sent to Rust as ISO "yyyy-MM-dd" - only these
+    // functions know about the other two formats.
+
+    // "yyyy-MM-dd" -> [y, m, d] ints, or null if not parseable.
+    function isoToParts(iso) {
+        if (!iso)
+            return null
+        let p = iso.split("-")
+        if (p.length !== 3)
+            return null
+        let y = parseInt(p[0]), m = parseInt(p[1]), d = parseInt(p[2])
+        return isNaN(y) || isNaN(m) || isNaN(d) ? null : [y, m, d]
+    }
+
+    // An ISO deadline as the user prefers to see it. "" stays "".
+    function fmtDate(iso) {
+        let p = root.isoToParts(iso)
+        if (!p)
+            return iso
+        let pad2 = n => (n < 10 ? "0" : "") + n
+        switch (settings.dateFormat) {
+        case 1: return pad2(p[1]) + "/" + pad2(p[2]) + "/" + p[0]  // MM/DD/YYYY
+        case 2: return pad2(p[2]) + "/" + pad2(p[1]) + "/" + p[0]  // DD/MM/YYYY
+        default: return iso                                        // YYYY-MM-DD
+        }
+    }
+
+    // The reverse of fmtDate: text in the current format -> ISO, or "" if
+    // it isn't a plausible date.
+    function parseDate(text) {
+        let parts = text.split(/[\/-]/).map(s => parseInt(s, 10))
+        if (parts.length !== 3 || parts.some(isNaN))
+            return ""
+        let y, m, d
+        if (settings.dateFormat === 1) { m = parts[0]; d = parts[1]; y = parts[2] }
+        else if (settings.dateFormat === 2) { d = parts[0]; m = parts[1]; y = parts[2] }
+        else { y = parts[0]; m = parts[1]; d = parts[2] }
+        if (y < 1000 || m < 1 || m > 12 || d < 1 || d > 31)
+            return ""
+        let pad2 = n => (n < 10 ? "0" : "") + n
+        return y + "-" + pad2(m) + "-" + pad2(d)
+    }
+
+    function dateInputMask() {
+        return settings.dateFormat === 0 ? "9999-99-99" : "99/99/9999"
+    }
+
+    function dateInputLabel() {
+        switch (settings.dateFormat) {
+        case 1: return qsTr("Deadline (MM/DD/YYYY)")
+        case 2: return qsTr("Deadline (DD/MM/YYYY)")
+        default: return qsTr("Deadline (YYYY-MM-DD)")
+        }
+    }
+
     // `baseSecs` of already-counted time plus the live segment since `sinceIso`
     // (pass "" for a paused timer), as HH:MM:SS.
     function fmtElapsed(baseSecs, sinceIso) {
@@ -589,12 +646,20 @@ ApplicationWindow {
         modal: true
         anchors.centerIn: Overlay.overlay
         width: 500
-        height: 640
+        height: Math.min(640, root.height - 60)
         padding: 18
         standardButtons: Dialog.Close
 
-        contentItem: ColumnLayout {
-            spacing: 18
+        // Scrolls once there are enough setting groups to overflow a
+        // reasonable dialog height, rather than a hand-tuned fixed height
+        // that needs bumping every time a group is added.
+        contentItem: ScrollView {
+            clip: true
+            contentWidth: availableWidth
+
+            ColumnLayout {
+                width: settingsDialog.availableWidth
+                spacing: 18
 
             // ---- Tasks group ----
             Label {
@@ -620,6 +685,51 @@ ApplicationWindow {
                 Switch {
                     checked: tasks.showDone
                     onToggled: tasks.showDone = checked
+                }
+            }
+
+            // ---- Dates group ----
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 2
+
+                Label {
+                    text: qsTr("Dates")
+                    font.bold: true
+                }
+                Label {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 8
+                    text: qsTr("How a deadline is shown and typed:")
+                    wrapMode: Text.WordWrap
+                }
+                Flow {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 8
+                    Layout.topMargin: 4
+                    spacing: 6
+                    Repeater {
+                        model: [
+                            { v: 0, label: qsTr("YYYY-MM-DD") },
+                            { v: 1, label: qsTr("MM/DD/YYYY") },
+                            { v: 2, label: qsTr("DD/MM/YYYY") },
+                        ]
+                        delegate: Button {
+                            required property var modelData
+                            text: modelData.label
+                            checkable: true
+                            checked: settings.dateFormat === modelData.v
+                            onClicked: settings.dateFormat = modelData.v
+                        }
+                    }
+                }
+                Label {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 8
+                    Layout.topMargin: 4
+                    font.pointSize: 8
+                    opacity: 0.6
+                    text: qsTr("e.g. “%1”").arg(root.fmtDate(root.isoPlusDays(0)))
                 }
             }
 
@@ -672,12 +782,13 @@ ApplicationWindow {
                     // named in the binding so it re-runs on change.
                     text: {
                         settings.deadlineCountdown
+                        settings.dateFormat
                         let d = new Date()
                         d.setDate(d.getDate() + 38)
                         let iso = Qt.formatDate(d, "yyyy-MM-dd")
                         let s = settings.countdownText(iso)
                         return s === "" ? qsTr("(hidden)")
-                                        : qsTr("e.g. “%1  ·  %2”").arg(iso).arg(s)
+                                        : qsTr("e.g. “%1  ·  %2”").arg(root.fmtDate(iso)).arg(s)
                     }
                 }
             }
@@ -756,7 +867,7 @@ ApplicationWindow {
                 }
             }
 
-            Item { Layout.fillHeight: true }
+            }
         }
     }
 
@@ -1325,14 +1436,15 @@ ApplicationWindow {
 
                         Label {
                             visible: rowItem.deadline !== ""
-                            // `settings.deadlineCountdown` is referenced so the
-                            // binding re-runs when the preference changes.
+                            // `settings.deadlineCountdown` / `dateFormat` are
+                            // referenced so the binding re-runs when either
+                            // preference changes.
                             readonly property string countdown:
                                 (settings.deadlineCountdown, rowItem.deadline !== "")
                                     ? settings.countdownText(rowItem.deadline) : ""
-                            text: countdown !== ""
-                                  ? rowItem.deadline + "  ·  " + countdown
-                                  : rowItem.deadline
+                            text: (settings.dateFormat, countdown !== ""
+                                  ? root.fmtDate(rowItem.deadline) + "  ·  " + countdown
+                                  : root.fmtDate(rowItem.deadline))
                             font.pointSize: 9
                             color: rowItem.overdue ? "#e74c3c" : palette.text
                             opacity: rowItem.overdue ? 1 : 0.7
@@ -1485,11 +1597,11 @@ ApplicationWindow {
                                     readonly property string countdown:
                                         (settings.deadlineCountdown, rowItem.deadline !== "")
                                             ? settings.countdownText(rowItem.deadline) : ""
-                                    text: rowItem.deadline === ""
+                                    text: (settings.dateFormat, rowItem.deadline === ""
                                           ? qsTr("none")
                                           : (countdown !== ""
-                                             ? rowItem.deadline + "  ·  " + countdown
-                                             : rowItem.deadline)
+                                             ? root.fmtDate(rowItem.deadline) + "  ·  " + countdown
+                                             : root.fmtDate(rowItem.deadline)))
                                     font.pointSize: 9
                                     color: rowItem.overdue ? "#e74c3c" : palette.text
                                 }
@@ -1835,13 +1947,13 @@ ApplicationWindow {
                         contentItem: ColumnLayout {
                             spacing: 8
                             Label {
-                                text: qsTr("Deadline (YYYY-MM-DD)")
+                                text: root.dateInputLabel()
                             }
                             TextField {
                                 id: dateInput
                                 Layout.fillWidth: true
-                                inputMask: "9999-99-99"
-                                text: rowItem.deadline
+                                inputMask: root.dateInputMask()
+                                text: root.fmtDate(rowItem.deadline)
                             }
                             RowLayout {
                                 Layout.alignment: Qt.AlignRight
@@ -1852,7 +1964,9 @@ ApplicationWindow {
                                 Button {
                                     text: qsTr("Set")
                                     onClicked: {
-                                        tasks.setDeadline(rowItem.index, dateInput.text)
+                                        let iso = root.parseDate(dateInput.text)
+                                        if (iso !== "")
+                                            tasks.setDeadline(rowItem.index, iso)
                                         datePopup.close()
                                     }
                                 }
