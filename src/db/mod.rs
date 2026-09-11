@@ -92,7 +92,8 @@ fn configure(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 const TASK_COLUMNS: &str = "id, parent_task_id, project_id, title, notes, \
-                            deadline, tracked, status, sort_order, created_at";
+                            deadline, tracked, status, sort_order, created_at, \
+                            initial_time_seconds";
 
 fn row_to_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
     Ok(Task {
@@ -106,6 +107,7 @@ fn row_to_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         status: TaskStatus::from_db(&r.get::<_, String>(7)?),
         sort_order: r.get(8)?,
         created_at: r.get(9)?,
+        initial_time_seconds: r.get(10)?,
     })
 }
 
@@ -202,9 +204,9 @@ fn annotate_branches(nodes: &mut [TaskNode]) {
 fn map_task_node(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskNode> {
     Ok(TaskNode {
         task: row_to_task(r)?,
-        depth: r.get::<_, i64>(10)? as u32,
-        has_children: r.get::<_, i64>(11)? != 0,
-        overdue: r.get::<_, i64>(12)? != 0,
+        depth: r.get::<_, i64>(11)? as u32,
+        has_children: r.get::<_, i64>(12)? != 0,
+        overdue: r.get::<_, i64>(13)? != 0,
         is_last_child: true,
         branch_more: Vec::new(),
     })
@@ -395,6 +397,19 @@ pub fn set_task_notes(conn: &Connection, id: &str, notes: &str) -> rusqlite::Res
     conn.execute(
         "UPDATE tasks SET notes = ?2 WHERE id = ?1",
         params![id, notes.trim_end()],
+    )?;
+    Ok(())
+}
+
+/// Set (or clear) a task's one-off starting duration - see
+/// [`Task::initial_time_seconds`](crate::domain::Task). Not summed into any
+/// time total; purely a display field.
+// TODO(quick-creation UI): called by the Quick Creation import (next PR).
+#[allow(dead_code)]
+pub fn set_initial_time(conn: &Connection, id: &str, seconds: Option<i64>) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE tasks SET initial_time_seconds = ?2 WHERE id = ?1",
+        params![id, seconds],
     )?;
     Ok(())
 }
