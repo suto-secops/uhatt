@@ -648,6 +648,8 @@ dependencies = [
  "cxx-qt-build",
  "cxx-qt-lib",
  "rusqlite",
+ "serde",
+ "serde_json",
  "uuid",
 ]
 

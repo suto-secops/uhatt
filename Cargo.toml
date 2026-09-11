@@ -22,6 +22,10 @@ cxx-qt-lib = { version = "0.10", default-features = false, features = ["qt_gui",
 # moving part. System-sqlite is a PKGBUILD-time question to revisit later.
 rusqlite = { version = "0.37", features = ["bundled"] }
 uuid = { version = "1", features = ["v7"] }
+# Used only for the "Recent actions" revert log: JSON-encoded snapshots/
+# before-state payloads in the `actions` table, and the JSON handed to QML.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [build-dependencies]
 cxx-qt-build = { version = "0.10", features = ["link_qt_object_files"] }
