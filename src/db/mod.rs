@@ -10,6 +10,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::domain::{new_id, EntrySource, Project, ProjectFilter, Task, TaskStatus, TimeEntry};
 
+pub mod actions;
 mod migrations;
 
 /// SQLite expression for the current wall-clock time, `YYYY-MM-DDTHH:MM:SS`.
