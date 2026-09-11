@@ -1215,27 +1215,49 @@ ApplicationWindow {
                 onClicked: root.mainView = "quickcreate"
             }
 
-            // ---- New project ----------------------------------------
-            MenuSeparator {
+            // "Empty project" is the other way to create a project - not a
+            // page (clicking the label does nothing, unlike "Quick
+            // creation" above), just a caption for the field + button below
+            // it. Boxed instead of separator-divided from "Quick creation"
+            // so the two read as siblings under "Project creation" rather
+            // than unrelated controls.
+            Rectangle {
                 Layout.fillWidth: true
-            }
-            RowLayout {
-                Layout.fillWidth: true
-                TextField {
-                    id: newProject
-                    Layout.fillWidth: true
-                    placeholderText: qsTr("New project")
-                    onAccepted: {
-                        projects.add(text)
-                        text = ""
+                Layout.topMargin: 4
+                radius: 4
+                color: Qt.rgba(palette.mid.r, palette.mid.g, palette.mid.b, 0.18)
+                implicitHeight: emptyProjectCol.implicitHeight + 12
+
+                ColumnLayout {
+                    id: emptyProjectCol
+                    anchors.fill: parent
+                    anchors.margins: 6
+                    spacing: 4
+
+                    Label {
+                        text: qsTr("Empty project")
+                        font.pointSize: 8
+                        opacity: 0.7
                     }
-                }
-                Button {
-                    text: "+"
-                    enabled: newProject.text.trim().length > 0
-                    onClicked: {
-                        projects.add(newProject.text)
-                        newProject.text = ""
+                    RowLayout {
+                        Layout.fillWidth: true
+                        TextField {
+                            id: newProject
+                            Layout.fillWidth: true
+                            placeholderText: qsTr("New project")
+                            onAccepted: {
+                                projects.add(text)
+                                text = ""
+                            }
+                        }
+                        Button {
+                            text: "+"
+                            enabled: newProject.text.trim().length > 0
+                            onClicked: {
+                                projects.add(newProject.text)
+                                newProject.text = ""
+                            }
+                        }
                     }
                 }
             }
@@ -2755,7 +2777,7 @@ ApplicationWindow {
                     clip: true
                     TextArea {
                         id: bodyArea
-                        placeholderText: qsTr("title|timeinvested|deadline|description, one task per line…")
+                        placeholderText: qsTr("One task per line, e.g. just \"title\" - see Format help for more")
                         wrapMode: TextArea.NoWrap
                         onTextChanged: reparseTimer.restart()
                         Component.onCompleted: quickCreatePane.reparse()
@@ -2873,8 +2895,10 @@ ApplicationWindow {
                     wrapMode: Text.WordWrap
                     text: qsTr(
                         "One line per task: <b>title|timeinvested|deadline|description</b>. " +
-                        "Only the title is required - leave a field empty between two “|”, " +
-                        "or write “na”, to skip it.")
+                        "Only the title is required, and a “|” is only needed up to the " +
+                        "last field you're giving - a bare title needs no “|” at all. To " +
+                        "skip a field before a later one you do want, leave it empty " +
+                        "between two “|”, or write “na”.")
                 }
                 Label {
                     Layout.fillWidth: true
@@ -2905,18 +2929,18 @@ ApplicationWindow {
                     font.family: "monospace"
                     wrapMode: Text.NoWrap
                     text: "math homework||2025-09-30|boring maths\n" +
-                          " exercise 1|||\n" +
-                          " exercise 2|||\n" +
-                          "  exercise 2.1|||\n" +
-                          "  exercise 2.2|||\n" +
-                          "  exercise 2.3|||\n" +
-                          " exercise 3|||\n" +
+                          " exercise 1\n" +
+                          " exercise 2\n" +
+                          "  exercise 2.1\n" +
+                          "  exercise 2.2\n" +
+                          "  exercise 2.3\n" +
+                          " exercise 3\n" +
                           "english project|||essays n stuff\n" +
-                          " essay on the reading book|||\n" +
-                          " essay on the class topic|||\n" +
-                          "  draft|||\n" +
-                          "  write out on laptop|||\n" +
-                          "  print|||"
+                          " essay on the reading book\n" +
+                          " essay on the class topic\n" +
+                          "  draft\n" +
+                          "  write out on laptop\n" +
+                          "  print"
                 }
             }
         }
