@@ -109,8 +109,10 @@ pub struct TimeEntry {
 // --- Quick creation: bulk text import for a new project --------------------
 //
 // One line per task: `title|timeinvested|deadline|description`, `|`
-// separated. `||` (or a field that trims to "na"/"n/a", case-insensitive)
-// marks an optional field as empty. Nesting is by indentation: more indent
+// separated. Only the title is required - trailing fields can be left off
+// entirely (a bare title needs no `|` at all; `title|2h` needs one), and a
+// field before a later one you do want can be left empty with `||` (or by
+// writing "na"/"n/a", case-insensitive). Nesting is by indentation: more indent
 // than the line above is a child (exactly one more unit of the configured
 // indent character - space or tab, never mixed); same indent is a sibling;
 // less indent must land exactly on some ancestor's indent, or it's an error.
@@ -224,13 +226,15 @@ pub struct QuickCreateLine {
 }
 
 /// Parse one line's `title|time|deadline|description` content (indentation
-/// already stripped) into a task, or an error message.
+/// already stripped) into a task, or an error message. A `|` is only needed
+/// up to the last field actually given - trailing fields left unspecified
+/// (not even an empty `|`) default to empty, so a bare title needs no `|` at
+/// all.
 fn parse_task_fields(content: &str, date_format: i32) -> Result<QuickCreateTask, String> {
-    let parts: Vec<&str> = content.splitn(4, '|').collect();
+    let mut parts: Vec<&str> = content.splitn(4, '|').collect();
+    parts.resize(4, "");
     let [title, time, deadline, description] = parts[..] else {
-        return Err(
-            "expected `title|timeinvested|deadline|description` (3 `|` separators)".to_owned(),
-        );
+        unreachable!("resized to exactly 4 elements above")
     };
     let title = title.trim();
     if title.is_empty() {
@@ -476,6 +480,47 @@ english project|||essays n stuff";
         assert_eq!(t.initial_time_seconds, None);
         assert_eq!(t.deadline, None);
         assert_eq!(t.description, "");
+    }
+
+    #[test]
+    fn quick_create_bare_title_needs_no_pipes() {
+        let text = "just a title";
+        let lines = parse_quick_creation(text, ' ', 0);
+        let t = lines[0].result.as_ref().unwrap();
+        assert_eq!(t.title, "just a title");
+        assert_eq!(t.initial_time_seconds, None);
+        assert_eq!(t.deadline, None);
+        assert_eq!(t.description, "");
+    }
+
+    #[test]
+    fn quick_create_omits_trailing_fields_not_just_pipes() {
+        let text = "task|2h";
+        let lines = parse_quick_creation(text, ' ', 0);
+        let t = lines[0].result.as_ref().unwrap();
+        assert_eq!(t.initial_time_seconds, Some(7200));
+        assert_eq!(t.deadline, None);
+        assert_eq!(t.description, "");
+    }
+
+    #[test]
+    fn quick_create_skips_a_middle_field_to_reach_a_later_one() {
+        let text = "task||2026-01-01";
+        let lines = parse_quick_creation(text, ' ', 0);
+        let t = lines[0].result.as_ref().unwrap();
+        assert_eq!(t.initial_time_seconds, None);
+        assert_eq!(t.deadline, Some("2026-01-01".to_owned()));
+    }
+
+    #[test]
+    fn quick_create_nested_tree_with_bare_titles() {
+        let text = "root\n child\n  grandchild\n child2";
+        let lines = parse_quick_creation(text, ' ', 0);
+        let depths: Vec<usize> = lines
+            .iter()
+            .map(|l| l.result.as_ref().unwrap().depth)
+            .collect();
+        assert_eq!(depths, vec![0, 1, 2, 1]);
     }
 
     #[test]
