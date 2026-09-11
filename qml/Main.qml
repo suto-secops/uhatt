@@ -2117,18 +2117,47 @@ ApplicationWindow {
                                         }
                                     }
                                 }
-                                // Up to three deadline chips, then "+N".
+                                // Up to three deadline chips, then "+N". Each
+                                // gets a small "mark done" box on the left -
+                                // everything here is by definition not done,
+                                // so it's a one-way tick, not a toggle.
                                 Repeater {
                                     model: Math.min(3, cell.dayItems.length)
-                                    delegate: Label {
+                                    delegate: RowLayout {
+                                        id: chip
                                         required property int index
+                                        readonly property var item:
+                                            cell.dayItems[chip.index]
                                         Layout.fillWidth: true
-                                        text: cell.dayItems[index].title
-                                        elide: Text.ElideRight
-                                        font.pointSize: 8
-                                        color: cell.dayItems[index].overdue
-                                               ? "#e74c3c" : palette.text
-                                        opacity: cell.inMonth ? 0.9 : 0.4
+                                        spacing: 3
+
+                                        Rectangle {
+                                            implicitWidth: 9
+                                            implicitHeight: 9
+                                            radius: 2
+                                            color: "transparent"
+                                            border.width: 1
+                                            border.color: chip.item.overdue
+                                                ? "#e74c3c" : palette.text
+                                            opacity: 0.6
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                anchors.margins: -3
+                                                onClicked: {
+                                                    calendar.setDone(chip.item.id, true)
+                                                    tasks.refresh()
+                                                }
+                                            }
+                                        }
+                                        Label {
+                                            Layout.fillWidth: true
+                                            text: chip.item.title
+                                            elide: Text.ElideRight
+                                            font.pointSize: 8
+                                            color: chip.item.overdue
+                                                   ? "#e74c3c" : palette.text
+                                            opacity: cell.inMonth ? 0.9 : 0.4
+                                        }
                                     }
                                 }
                                 Label {
@@ -2251,7 +2280,19 @@ ApplicationWindow {
                         delegate: ItemDelegate {
                             required property var modelData
                             Layout.fillWidth: true
-                            contentItem: ColumnLayout {
+                            contentItem: RowLayout {
+                                spacing: 6
+                                // Everything listed here is not done by
+                                // definition, so this is a one-way tick.
+                                CheckBox {
+                                    checked: false
+                                    onToggled: {
+                                        calendar.setDone(modelData.id, true)
+                                        tasks.refresh()
+                                    }
+                                }
+                                ColumnLayout {
+                                Layout.fillWidth: true
                                 spacing: 0
                                 Label {
                                     text: modelData.title
@@ -2264,6 +2305,7 @@ ApplicationWindow {
                                     text: modelData.project
                                     font.pointSize: 8
                                     opacity: 0.6
+                                }
                                 }
                             }
                         }

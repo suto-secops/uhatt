@@ -13,6 +13,7 @@ use cxx_qt_lib::QString;
 use rusqlite::Connection;
 
 use crate::db;
+use crate::domain::TaskStatus;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -42,6 +43,13 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "itemsJson"]
         fn items_json(self: &Calendar) -> QString;
+
+        /// Mark a task done / not-done by id and reload. A task marked done
+        /// drops out of the deadline list (same rule as everywhere else in
+        /// the app), so this also removes it from the calendar page.
+        #[qinvokable]
+        #[cxx_name = "setDone"]
+        fn set_done(self: Pin<&mut Calendar>, id: &QString, done: bool);
     }
 }
 
@@ -85,6 +93,19 @@ impl qobject::Calendar {
         }
         let next = self.revision.wrapping_add(1);
         self.as_mut().set_revision(next);
+    }
+
+    fn set_done(self: Pin<&mut Self>, id: &QString, done: bool) {
+        let status = if done {
+            TaskStatus::Done
+        } else {
+            TaskStatus::Todo
+        };
+        if let Err(e) = db::set_task_status(self.db_conn(), &id.to_string(), status) {
+            eprintln!("uhatt: calendar setDone failed: {e}");
+            return;
+        }
+        self.reload();
     }
 
     fn items_json(&self) -> QString {
