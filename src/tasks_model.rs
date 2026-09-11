@@ -597,7 +597,7 @@ impl qobject::TaskListModel {
                 .map(|p| p.name)
                 .unwrap_or_default();
             if let Err(e) =
-                db::actions::log_set_project(self.db_conn(), &title, &old_map, &new_name)
+                db::actions::log_set_project(self.db_conn(), &task_id, &title, &old_map, &new_name)
             {
                 eprintln!("uhatt: log set_project failed: {e}");
             }

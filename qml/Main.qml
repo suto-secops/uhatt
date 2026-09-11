@@ -2558,6 +2558,12 @@ ApplicationWindow {
                             Layout.fillWidth: true
                             spacing: 2
                             Label {
+                                text: adel.modelData.projectLabel
+                                font.bold: true
+                                font.pointSize: 8
+                                opacity: 0.75
+                            }
+                            Label {
                                 text: adel.modelData.summary
                                 Layout.fillWidth: true
                                 elide: Text.ElideRight
@@ -2569,7 +2575,7 @@ ApplicationWindow {
                             }
                         }
                         Button {
-                            text: qsTr("Reset")
+                            text: qsTr("Undo")
                             onClicked: {
                                 actionsLog.reset(adel.modelData.id)
                                 tasks.refresh()
@@ -2577,7 +2583,7 @@ ApplicationWindow {
                             }
                         }
                         Button {
-                            text: qsTr("Reset from here")
+                            text: qsTr("Undo from here")
                             onClicked: {
                                 actionsLog.resetFrom(adel.modelData.id)
                                 tasks.refresh()

@@ -26,19 +26,70 @@ pub struct ActionRow {
     pub id: i64,
     pub summary: String,
     pub created_at: String,
+    /// The task's current project name, or "Tasks w/o project" when it has
+    /// none - or, for a delete, no longer exists to ask.
+    pub project_label: String,
+}
+
+const NO_PROJECT_LABEL: &str = "Tasks w/o project";
+
+/// The task id an action's payload is about, per its own shape (see the
+/// `log_*` functions below) - `None` for a shape that doesn't carry one.
+fn task_id_of(kind: &str, value: &serde_json::Value) -> Option<String> {
+    let id = match kind {
+        "delete_task" => value.get("tasks")?.get(0)?.get("id")?,
+        _ => value.get("id")?,
+    };
+    id.as_str().map(str::to_owned)
+}
+
+/// The project label for one action row: the task's *current* project if it
+/// still exists, else (for a delete) the project it was in when deleted,
+/// else [`NO_PROJECT_LABEL`].
+fn project_label_of(conn: &Connection, kind: &str, payload: &str) -> String {
+    let value: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
+    let project_id =
+        match task_id_of(kind, &value).and_then(|id| super::get_task(conn, &id).ok()?) {
+            Some(task) => task.project_id,
+            None if kind == "delete_task" => value
+                .get("tasks")
+                .and_then(|t| t.get(0))
+                .and_then(|t| t.get("project_id"))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            None => None,
+        };
+    match project_id.and_then(|id| super::get_project(conn, &id).ok()?) {
+        Some(p) => p.name,
+        None => NO_PROJECT_LABEL.to_owned(),
+    }
 }
 
 /// Newest first.
 pub fn list_actions(conn: &Connection) -> rusqlite::Result<Vec<ActionRow>> {
-    let mut stmt = conn.prepare("SELECT id, summary, created_at FROM actions ORDER BY id DESC")?;
+    let mut stmt = conn
+        .prepare("SELECT id, kind, summary, payload, created_at FROM actions ORDER BY id DESC")?;
     let rows = stmt.query_map([], |r| {
-        Ok(ActionRow {
-            id: r.get(0)?,
-            summary: r.get(1)?,
-            created_at: r.get(2)?,
-        })
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, String>(4)?,
+        ))
     })?;
-    rows.collect()
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, kind, summary, payload, created_at) = row?;
+        let project_label = project_label_of(conn, &kind, &payload);
+        out.push(ActionRow {
+            id,
+            summary,
+            created_at,
+            project_label,
+        });
+    }
+    Ok(out)
 }
 
 fn insert_action(
@@ -141,11 +192,13 @@ pub fn log_set_status(
 
 pub fn log_set_project(
     conn: &Connection,
+    task_id: &str,
     title: &str,
     old_project_ids: &BTreeMap<String, Option<String>>,
     new_project_name: &str,
 ) -> rusqlite::Result<()> {
-    let payload = serde_json::to_string(old_project_ids).unwrap_or_else(|_| "{}".to_owned());
+    let payload =
+        serde_json::json!({ "id": task_id, "old_project_ids": old_project_ids }).to_string();
     let summary = if new_project_name.is_empty() {
         format!("Moved \"{title}\" to Unfiled")
     } else {
@@ -359,8 +412,10 @@ fn apply_one(conn: &Connection, action_id: i64) -> rusqlite::Result<()> {
             }
         }
         "set_project" => {
-            let map: BTreeMap<String, Option<String>> =
-                serde_json::from_value(value).unwrap_or_default();
+            let map: BTreeMap<String, Option<String>> = value
+                .get("old_project_ids")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
             for (id, project_id) in &map {
                 conn.execute(
                     "UPDATE tasks SET project_id = ?2 WHERE id = ?1",
@@ -486,6 +541,44 @@ mod tests {
     }
 
     #[test]
+    fn project_label_reflects_current_project_or_unfiled() {
+        let conn = super::super::open_in_memory().unwrap();
+        let p = super::super::create_project(&conn, "Work").unwrap();
+
+        let in_project =
+            super::super::create_task(&conn, "quarterly report", None, Some(&p.id)).unwrap();
+        log_create_task(&conn, &in_project).unwrap();
+
+        let no_project = root(&conn, "buy groceries");
+        log_create_task(&conn, &no_project).unwrap();
+
+        let rows = list_actions(&conn).unwrap();
+        let in_project_row = rows
+            .iter()
+            .find(|r| r.summary.contains("quarterly"))
+            .unwrap();
+        let no_project_row = rows
+            .iter()
+            .find(|r| r.summary.contains("groceries"))
+            .unwrap();
+        assert_eq!(in_project_row.project_label, "Work");
+        assert_eq!(no_project_row.project_label, NO_PROJECT_LABEL);
+    }
+
+    #[test]
+    fn project_label_falls_back_to_snapshot_for_a_deleted_task() {
+        let conn = super::super::open_in_memory().unwrap();
+        let p = super::super::create_project(&conn, "Work").unwrap();
+        let t = super::super::create_task(&conn, "gone", None, Some(&p.id)).unwrap();
+
+        capture_and_log_delete(&conn, &t.id).unwrap();
+        super::super::delete_task(&conn, &t.id).unwrap();
+
+        let rows = list_actions(&conn).unwrap();
+        assert_eq!(rows[0].project_label, "Work");
+    }
+
+    #[test]
     fn create_task_reverts_to_no_task() {
         let conn = super::super::open_in_memory().unwrap();
         let t = root(&conn, "write plan");
@@ -572,7 +665,7 @@ mod tests {
 
         let old_map = capture_project_ids(&conn, &parent.id).unwrap();
         super::super::set_task_project(&conn, &parent.id, Some(&p.id)).unwrap();
-        log_set_project(&conn, &parent.title, &old_map, "Work").unwrap();
+        log_set_project(&conn, &parent.id, &parent.title, &old_map, "Work").unwrap();
 
         let id = only_action_id(&conn);
         revert_action(&conn, id).unwrap();
