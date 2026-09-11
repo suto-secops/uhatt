@@ -10,6 +10,7 @@ fn main() {
             "src/graph_model.rs",
             "src/settings.rs",
             "src/calendar.rs",
+            "src/actions_log.rs",
         ])
         .build();
 }

@@ -122,15 +122,21 @@ ApplicationWindow {
     Calendar {
         id: calendar
     }
+    ActionsLog {
+        id: actionsLog
+    }
 
-    // Which page fills the centre pane: "tasks" (the list) or "calendar".
+    // Which page fills the centre pane: "tasks", "calendar" or "actions".
     property string mainView: "tasks"
     // Sidebar width - fixed unless the user drags the divider.
     property real sidebarWidth: 200
 
-    // The calendar loads its data once at startup; re-read it each time the
-    // page is opened so deadline edits made on the task list show up.
-    onMainViewChanged: if (mainView === "calendar") calendar.reload()
+    // Both pages load their data once at startup; re-read each time the page
+    // is opened so edits made elsewhere show up.
+    onMainViewChanged: {
+        if (mainView === "calendar") calendar.reload()
+        if (mainView === "actions") actionsLog.reload()
+    }
 
     // Floating chip shown under the cursor while a task is being dragged onto
     // another to re-parent it. Lives at the window level so it isn't clipped by
@@ -1124,6 +1130,12 @@ ApplicationWindow {
                 highlighted: root.mainView === "calendar"
                 onClicked: root.mainView = "calendar"
             }
+            ItemDelegate {
+                Layout.fillWidth: true
+                text: qsTr("Recent actions")
+                highlighted: root.mainView === "actions"
+                onClicked: root.mainView = "actions"
+            }
 
             // ---- New project ----------------------------------------
             MenuSeparator {
@@ -1191,7 +1203,8 @@ ApplicationWindow {
         StackLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            currentIndex: root.mainView === "calendar" ? 1 : 0
+            currentIndex: root.mainView === "calendar" ? 1
+                          : root.mainView === "actions" ? 2 : 0
 
         // ---- Tasks -----------------------------------------------------
         ColumnLayout {
@@ -2486,6 +2499,86 @@ ApplicationWindow {
                         Layout.topMargin: 6
                     }
                     Item { Layout.fillHeight: true }
+                }
+            }
+        }
+
+        // ---- Recent actions --------------------------------------------
+        ColumnLayout {
+            id: actionsPane
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            spacing: 8
+
+            // Re-parsed whenever the model bumps `revision`.
+            readonly property var items:
+                (actionsLog.revision, JSON.parse(actionsLog.itemsJson()))
+
+            function fmt(iso) {
+                return Qt.formatDateTime(new Date(iso), "yyyy-MM-dd hh:mm")
+            }
+
+            Label {
+                text: qsTr("Recent actions")
+                font.bold: true
+                font.pointSize: 12
+                Layout.margins: 8
+                Layout.bottomMargin: 0
+            }
+            Label {
+                visible: actionsPane.items.length === 0
+                text: qsTr("Nothing to show yet")
+                opacity: 0.5
+                Layout.leftMargin: 8
+            }
+            ListView {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                Layout.margins: 8
+                clip: true
+                model: actionsPane.items
+                spacing: 4
+
+                delegate: ItemDelegate {
+                    id: adel
+                    required property var modelData
+
+                    width: ListView.view.width
+                    hoverEnabled: false
+
+                    contentItem: RowLayout {
+                        spacing: 8
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 2
+                            Label {
+                                text: adel.modelData.summary
+                                Layout.fillWidth: true
+                                elide: Text.ElideRight
+                            }
+                            Label {
+                                text: actionsPane.fmt(adel.modelData.createdAt)
+                                font.pointSize: 8
+                                opacity: 0.6
+                            }
+                        }
+                        Button {
+                            text: qsTr("Reset")
+                            onClicked: {
+                                actionsLog.reset(adel.modelData.id)
+                                tasks.refresh()
+                                calendar.reload()
+                            }
+                        }
+                        Button {
+                            text: qsTr("Reset from here")
+                            onClicked: {
+                                actionsLog.resetFrom(adel.modelData.id)
+                                tasks.refresh()
+                                calendar.reload()
+                            }
+                        }
+                    }
                 }
             }
         }

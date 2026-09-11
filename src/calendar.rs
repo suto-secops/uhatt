@@ -96,14 +96,23 @@ impl qobject::Calendar {
     }
 
     fn set_done(self: Pin<&mut Self>, id: &QString, done: bool) {
+        let id = id.to_string();
         let status = if done {
             TaskStatus::Done
         } else {
             TaskStatus::Todo
         };
-        if let Err(e) = db::set_task_status(self.db_conn(), &id.to_string(), status) {
+        let before = db::get_task(self.db_conn(), &id).ok().flatten();
+        if let Err(e) = db::set_task_status(self.db_conn(), &id, status) {
             eprintln!("uhatt: calendar setDone failed: {e}");
             return;
+        }
+        if let Some(t) = before {
+            if let Err(e) =
+                db::actions::log_set_status(self.db_conn(), &id, &t.title, t.status, done)
+            {
+                eprintln!("uhatt: log set_status failed: {e}");
+            }
         }
         self.reload();
     }

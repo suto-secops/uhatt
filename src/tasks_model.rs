@@ -17,7 +17,7 @@ use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QStri
 use rusqlite::Connection;
 
 use crate::db::{self, TaskNode};
-use crate::domain::{ProjectFilter, TaskStatus};
+use crate::domain::{ProjectFilter, Task, TaskStatus};
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -334,6 +334,13 @@ impl qobject::TaskListModel {
             .expect("TaskListModel used before initialize()")
     }
 
+    /// The task as it is right now, for capturing "before" state ahead of a
+    /// mutation - the action log needs the old title/notes/deadline/status,
+    /// not what's about to be written.
+    fn task_before(&self, id: &str) -> Option<Task> {
+        db::get_task(self.db_conn(), id).ok().flatten()
+    }
+
     fn node_at(&self, row: i32) -> Option<&TaskNode> {
         let row = usize::try_from(row).ok()?;
         let idx = *self.visible.get(row)?;
@@ -479,6 +486,9 @@ impl qobject::TaskListModel {
     fn delete_selected(mut self: Pin<&mut Self>) {
         let ids: Vec<String> = self.selected.iter().cloned().collect();
         for id in &ids {
+            if let Err(e) = db::actions::capture_and_log_delete(self.db_conn(), id) {
+                eprintln!("uhatt: log delete failed for {id}: {e}");
+            }
             if let Err(e) = db::delete_task(self.db_conn(), id) {
                 eprintln!("uhatt: bulk delete failed for {id}: {e}");
             }
@@ -496,8 +506,17 @@ impl qobject::TaskListModel {
     fn revert_selected(mut self: Pin<&mut Self>) {
         let ids: Vec<String> = self.selected.iter().cloned().collect();
         for id in &ids {
+            let before = self.task_before(id);
             if let Err(e) = db::set_task_status(self.db_conn(), id, TaskStatus::Todo) {
                 eprintln!("uhatt: bulk revert failed for {id}: {e}");
+                continue;
+            }
+            if let Some(t) = before {
+                if let Err(e) =
+                    db::actions::log_set_status(self.db_conn(), id, &t.title, t.status, false)
+                {
+                    eprintln!("uhatt: log set_status failed for {id}: {e}");
+                }
             }
         }
         {
@@ -522,9 +541,15 @@ impl qobject::TaskListModel {
             ProjectFilter::Only(id) => Some(id),
             _ => None,
         };
-        if let Err(e) = db::create_task(self.db_conn(), title, None, project.as_deref()) {
-            eprintln!("uhatt: add task failed: {e}");
-            return;
+        let task = match db::create_task(self.db_conn(), title, None, project.as_deref()) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("uhatt: add task failed: {e}");
+                return;
+            }
+        };
+        if let Err(e) = db::actions::log_create_task(self.db_conn(), &task) {
+            eprintln!("uhatt: log create_task failed: {e}");
         }
         self.reload();
     }
@@ -539,9 +564,15 @@ impl qobject::TaskListModel {
             return;
         };
         // Subtasks inherit the parent's project, so pass None here.
-        if let Err(e) = db::create_task(self.db_conn(), title, Some(&parent_id), None) {
-            eprintln!("uhatt: add subtask failed: {e}");
-            return;
+        let task = match db::create_task(self.db_conn(), title, Some(&parent_id), None) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("uhatt: add subtask failed: {e}");
+                return;
+            }
+        };
+        if let Err(e) = db::actions::log_create_task(self.db_conn(), &task) {
+            eprintln!("uhatt: log create_task failed: {e}");
         }
         // Make sure the new child is visible.
         self.as_mut().rust_mut().collapsed.remove(&parent_id);
@@ -554,9 +585,22 @@ impl qobject::TaskListModel {
         };
         let project_id = project_id.to_string();
         let target = (!project_id.is_empty()).then_some(project_id.as_str());
+        let title = self.task_before(&task_id).map(|t| t.title);
+        let old_map = db::actions::capture_project_ids(self.db_conn(), &task_id).ok();
         if let Err(e) = db::set_task_project(self.db_conn(), &task_id, target) {
             eprintln!("uhatt: move task to project failed: {e}");
             return;
+        }
+        if let (Some(title), Some(old_map)) = (title, old_map) {
+            let new_name = target
+                .and_then(|id| db::get_project(self.db_conn(), id).ok().flatten())
+                .map(|p| p.name)
+                .unwrap_or_default();
+            if let Err(e) =
+                db::actions::log_set_project(self.db_conn(), &title, &old_map, &new_name)
+            {
+                eprintln!("uhatt: log set_project failed: {e}");
+            }
         }
         self.reload();
     }
@@ -569,9 +613,38 @@ impl qobject::TaskListModel {
         if target.is_empty() {
             return;
         }
+        let before = self.task_before(&task_id);
+        let old_map = db::actions::capture_project_ids(self.db_conn(), &task_id).ok();
+        let new_parent_title = self.task_before(&target).map(|t| t.title);
         if let Err(e) = db::reparent_task(self.db_conn(), &task_id, &target) {
             eprintln!("uhatt: reparent failed: {e}");
             return;
+        }
+        // `reparent_task` silently no-ops when `can_reparent` would reject
+        // the move (cycle, ghost id, ...) - re-read rather than assume it
+        // happened, so a rejected drop doesn't get logged as a real action.
+        let changed = self
+            .task_before(&task_id)
+            .zip(before.as_ref())
+            .is_some_and(|(after, t)| {
+                after.parent_id != t.parent_id || after.sort_order != t.sort_order
+            });
+        if changed {
+            if let (Some(t), Some(old_map), Some(new_parent_title)) =
+                (before, old_map, new_parent_title)
+            {
+                if let Err(e) = db::actions::log_reparent(
+                    self.db_conn(),
+                    &task_id,
+                    &t.title,
+                    t.parent_id.as_deref(),
+                    t.sort_order,
+                    &old_map,
+                    &new_parent_title,
+                ) {
+                    eprintln!("uhatt: log reparent failed: {e}");
+                }
+            }
         }
         self.reload();
     }
@@ -588,6 +661,9 @@ impl qobject::TaskListModel {
         let Some(id) = self.id_at(row) else {
             return;
         };
+        if let Err(e) = db::actions::capture_and_log_delete(self.db_conn(), &id) {
+            eprintln!("uhatt: log delete failed: {e}");
+        }
         if let Err(e) = db::delete_task(self.db_conn(), &id) {
             eprintln!("uhatt: delete task failed: {e}");
             return;
@@ -604,9 +680,17 @@ impl qobject::TaskListModel {
         } else {
             TaskStatus::Todo
         };
+        let before = self.task_before(&id);
         if let Err(e) = db::set_task_status(self.db_conn(), &id, status) {
             eprintln!("uhatt: set task status failed: {e}");
             return;
+        }
+        if let Some(t) = before {
+            if let Err(e) =
+                db::actions::log_set_status(self.db_conn(), &id, &t.title, t.status, done)
+            {
+                eprintln!("uhatt: log set_status failed: {e}");
+            }
         }
         self.reload();
     }
@@ -620,9 +704,17 @@ impl qobject::TaskListModel {
         let Some(id) = self.id_at(row) else {
             return;
         };
+        let before = self.task_before(&id);
         if let Err(e) = db::rename_task(self.db_conn(), &id, title) {
             eprintln!("uhatt: rename task failed: {e}");
             return;
+        }
+        if let Some(t) = before {
+            if t.title != title {
+                if let Err(e) = db::actions::log_rename_task(self.db_conn(), &id, &t.title, title) {
+                    eprintln!("uhatt: log rename_task failed: {e}");
+                }
+            }
         }
         self.reload();
     }
@@ -631,9 +723,19 @@ impl qobject::TaskListModel {
         let Some(id) = self.id_at(row) else {
             return;
         };
-        if let Err(e) = db::set_task_notes(self.db_conn(), &id, &notes.to_string()) {
+        let before = self.task_before(&id);
+        let new_notes = notes.to_string();
+        if let Err(e) = db::set_task_notes(self.db_conn(), &id, &new_notes) {
             eprintln!("uhatt: set task notes failed: {e}");
             return;
+        }
+        if let Some(t) = before {
+            if t.notes != new_notes.trim_end() {
+                if let Err(e) = db::actions::log_set_notes(self.db_conn(), &id, &t.title, &t.notes)
+                {
+                    eprintln!("uhatt: log set_notes failed: {e}");
+                }
+            }
         }
         self.reload();
     }
@@ -660,9 +762,26 @@ impl qobject::TaskListModel {
         let deadline = deadline.to_string();
         let deadline = deadline.trim();
         let target = (!deadline.is_empty()).then_some(deadline);
+        let before = self.task_before(&id);
         if let Err(e) = db::set_task_deadline(self.db_conn(), &id, target) {
             eprintln!("uhatt: set deadline failed: {e}");
             return;
+        }
+        // Re-read rather than trust `target`: a malformed date is a silent
+        // no-op in `set_task_deadline`, and this must not log a "change"
+        // that never actually happened.
+        if let (Some(t), Some(after)) = (before, self.task_before(&id)) {
+            if t.deadline != after.deadline {
+                if let Err(e) = db::actions::log_set_deadline(
+                    self.db_conn(),
+                    &id,
+                    &t.title,
+                    t.deadline.as_deref(),
+                    after.deadline.as_deref(),
+                ) {
+                    eprintln!("uhatt: log set_deadline failed: {e}");
+                }
+            }
         }
         self.reload();
     }

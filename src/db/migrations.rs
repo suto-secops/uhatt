@@ -6,7 +6,7 @@
 
 use rusqlite::Connection;
 
-pub const MIGRATIONS: &[&str] = &[V1, V2];
+pub const MIGRATIONS: &[&str] = &[V1, V2, V3];
 
 /// Number of migration steps the code expects the database to be at.
 pub const COUNT: usize = MIGRATIONS.len();
@@ -90,5 +90,18 @@ const V2: &str = r#"
 CREATE TABLE meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+"#;
+
+// The "Recent actions" revert log. `id` orders entries (newest = highest) and
+// is what "reset from here" ranges over; `payload` is kind-specific JSON with
+// whatever before-state a revert needs (see `db::actions`).
+const V3: &str = r#"
+CREATE TABLE actions (
+    id          INTEGER PRIMARY KEY,
+    kind        TEXT NOT NULL,
+    summary     TEXT NOT NULL,
+    payload     TEXT NOT NULL,
+    created_at  TEXT NOT NULL
 );
 "#;
