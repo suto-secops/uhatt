@@ -191,6 +191,12 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "toggleExpanded"]
         fn toggle_expanded(self: Pin<&mut TaskListModel>, row: i32);
+
+        /// Re-read from SQLite. For picking up a mutation made through
+        /// another QObject (e.g. marking a task done from the calendar page)
+        /// - every mutation here already reloads itself.
+        #[qinvokable]
+        fn refresh(self: Pin<&mut TaskListModel>);
     }
 
     // QAbstractListModel overrides.
@@ -682,6 +688,10 @@ impl qobject::TaskListModel {
             self.as_mut().rust_mut().visible = visible;
             self.as_mut().end_reset_model();
         }
+    }
+
+    fn refresh(self: Pin<&mut Self>) {
+        self.reload();
     }
 
     fn data(&self, index: &QModelIndex, role: i32) -> QVariant {
