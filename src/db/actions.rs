@@ -354,6 +354,70 @@ pub fn capture_and_log_delete(conn: &Connection, task_id: &str) -> rusqlite::Res
     insert_action(conn, "delete_task", &summary, &payload)
 }
 
+/// What [`import_quick_creation`] created.
+pub struct ImportOutcome {
+    pub project_id: String,
+    pub task_count: usize,
+}
+
+/// Run a whole quick-creation import atomically: create the project, then
+/// each task in `tasks`' order (already depth-validated by
+/// [`crate::domain::parse_quick_creation`]) - a task's parent is the most
+/// recently created task at `depth - 1`, the same stack the parser itself
+/// used to assign depths - then log the whole batch as one undoable action.
+/// All-or-nothing: a failure partway rolls back the whole import.
+pub fn import_quick_creation(
+    conn: &Connection,
+    project_name: &str,
+    tasks: &[crate::domain::QuickCreateTask],
+) -> rusqlite::Result<ImportOutcome> {
+    let tx = conn.unchecked_transaction()?;
+    let project = super::create_project(&tx, project_name)?;
+
+    let mut stack: Vec<String> = Vec::new();
+    let mut created_ids: Vec<String> = Vec::new();
+    for t in tasks {
+        let parent_id = if t.depth == 0 {
+            None
+        } else {
+            stack.get(t.depth - 1).map(String::as_str)
+        };
+        let root_project = (t.depth == 0).then_some(project.id.as_str());
+        let task = super::create_task(&tx, &t.title, parent_id, root_project)?;
+        if let Some(d) = &t.deadline {
+            super::set_task_deadline(&tx, &task.id, Some(d.as_str()))?;
+        }
+        if let Some(secs) = t.initial_time_seconds {
+            super::set_initial_time(&tx, &task.id, Some(secs))?;
+        }
+        if !t.description.is_empty() {
+            super::set_task_notes(&tx, &task.id, &t.description)?;
+        }
+        stack.truncate(t.depth);
+        stack.push(task.id.clone());
+        created_ids.push(task.id);
+    }
+
+    let summary = format!(
+        "Created project \"{project_name}\" with {} task{}",
+        created_ids.len(),
+        if created_ids.len() == 1 { "" } else { "s" }
+    );
+    let payload = serde_json::json!({
+        "project_id": project.id,
+        "task_ids": created_ids,
+    })
+    .to_string();
+    insert_action(&tx, "import_project", &summary, &payload)?;
+
+    let outcome = ImportOutcome {
+        project_id: project.id,
+        task_count: created_ids.len(),
+    };
+    tx.commit()?;
+    Ok(outcome)
+}
+
 // --- Revert ------------------------------------------------------------
 
 fn exists(conn: &Connection, table: &str, id: &str) -> rusqlite::Result<bool> {
@@ -493,6 +557,23 @@ fn apply_one(conn: &Connection, action_id: i64) -> rusqlite::Result<()> {
                     params![e.id, e.task_id, e.start_ts, e.end_ts, e.source, e.note, e.created_at],
                 )?;
             }
+        }
+        "import_project" => {
+            #[derive(Deserialize)]
+            struct Payload {
+                project_id: String,
+                task_ids: Vec<String>,
+            }
+            let Ok(p) = serde_json::from_value::<Payload>(value) else {
+                return Ok(());
+            };
+            // `project_id` is `ON DELETE SET NULL` on tasks, not CASCADE, so
+            // the tasks must be deleted explicitly too - deleting a root
+            // first cascades its children, making their own deletes no-ops.
+            for id in &p.task_ids {
+                super::delete_task(conn, id)?;
+            }
+            super::delete_project(conn, &p.project_id)?;
         }
         _ => {}
     }

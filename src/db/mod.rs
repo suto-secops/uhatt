@@ -404,8 +404,6 @@ pub fn set_task_notes(conn: &Connection, id: &str, notes: &str) -> rusqlite::Res
 /// Set (or clear) a task's one-off starting duration - see
 /// [`Task::initial_time_seconds`](crate::domain::Task). Not summed into any
 /// time total; purely a display field.
-// TODO(quick-creation UI): called by the Quick Creation import (next PR).
-#[allow(dead_code)]
 pub fn set_initial_time(conn: &Connection, id: &str, seconds: Option<i64>) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE tasks SET initial_time_seconds = ?2 WHERE id = ?1",

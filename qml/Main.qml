@@ -125,8 +125,12 @@ ApplicationWindow {
     ActionsLog {
         id: actionsLog
     }
+    QuickCreate {
+        id: quickCreate
+    }
 
-    // Which page fills the centre pane: "tasks", "calendar" or "actions".
+    // Which page fills the centre pane: "tasks", "calendar", "actions" or
+    // "quickcreate".
     property string mainView: "tasks"
     // Sidebar width - fixed unless the user drags the divider.
     property real sidebarWidth: 200
@@ -1195,6 +1199,22 @@ ApplicationWindow {
                 onClicked: root.mainView = "actions"
             }
 
+            // ---- Project creation ------------------------------------
+            MenuSeparator {
+                Layout.fillWidth: true
+            }
+            Label {
+                text: qsTr("Project creation")
+                font.bold: true
+                Layout.topMargin: 2
+            }
+            ItemDelegate {
+                Layout.fillWidth: true
+                text: qsTr("Quick creation")
+                highlighted: root.mainView === "quickcreate"
+                onClicked: root.mainView = "quickcreate"
+            }
+
             // ---- New project ----------------------------------------
             MenuSeparator {
                 Layout.fillWidth: true
@@ -1262,7 +1282,8 @@ ApplicationWindow {
             Layout.fillWidth: true
             Layout.fillHeight: true
             currentIndex: root.mainView === "calendar" ? 1
-                          : root.mainView === "actions" ? 2 : 0
+                          : root.mainView === "actions" ? 2
+                          : root.mainView === "quickcreate" ? 3 : 0
 
         // ---- Tasks -----------------------------------------------------
         ColumnLayout {
@@ -2672,7 +2693,232 @@ ApplicationWindow {
                 }
             }
         }
+
+        // ---- Quick creation ---------------------------------------------
+        ColumnLayout {
+            id: quickCreatePane
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            spacing: 8
+
+            // Parsed preview, re-computed (debounced) as the user types.
+            property var previewLines: []
+            readonly property bool hasError:
+                previewLines.length === 0 || previewLines.some(l => !l.ok)
+            property string createError: ""
+
+            function reparse() {
+                previewLines = JSON.parse(quickCreate.parse(
+                    bodyArea.text, settings.quickCreateIndentTab, settings.dateFormat))
+            }
+
+            Timer {
+                id: reparseTimer
+                interval: 150
+                repeat: false
+                onTriggered: quickCreatePane.reparse()
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Label {
+                    text: qsTr("Quick creation")
+                    font.bold: true
+                    font.pointSize: 12
+                }
+                Item { Layout.fillWidth: true }
+                Button {
+                    text: qsTr("Format help")
+                    onClicked: formatHelpDialog.open()
+                }
+            }
+
+            TextField {
+                id: quickProjectName
+                Layout.fillWidth: true
+                placeholderText: qsTr("Project name")
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                spacing: 8
+
+                ScrollView {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    // Equal, explicit preferredWidth on both sides of this
+                    // row - otherwise the TextArea's own content-driven
+                    // implicitWidth (it doesn't wrap) skews the fillWidth
+                    // split and starves the preview panel down to ~0.
+                    Layout.preferredWidth: 1
+                    clip: true
+                    TextArea {
+                        id: bodyArea
+                        placeholderText: qsTr("title|timeinvested|deadline|description, one task per line…")
+                        wrapMode: TextArea.NoWrap
+                        onTextChanged: reparseTimer.restart()
+                        Component.onCompleted: quickCreatePane.reparse()
+                    }
+                }
+
+                Frame {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    Layout.preferredWidth: 1
+
+                    contentItem: ListView {
+                        clip: true
+                        model: quickCreatePane.previewLines
+                        spacing: 2
+                        ScrollBar.vertical: ScrollBar {}
+                        delegate: Item {
+                                id: previewRow
+                                required property var modelData
+                                width: ListView.view.width
+                                height: previewLabel.implicitHeight + 4
+
+                                RowLayout {
+                                    anchors.fill: parent
+                                    spacing: 4
+
+                                    // Simple per-depth indent guides - not the
+                                    // full elbow/tee precision of the task
+                                    // list, just enough to see nesting while
+                                    // typing.
+                                    Repeater {
+                                        model: previewRow.modelData.ok ? previewRow.modelData.depth : 0
+                                        delegate: Item {
+                                            width: 14
+                                            height: previewRow.height
+                                            Rectangle {
+                                                anchors.horizontalCenter: parent.horizontalCenter
+                                                width: 1
+                                                height: parent.height
+                                                color: palette.text
+                                                opacity: 0.3
+                                            }
+                                        }
+                                    }
+                                    Label {
+                                        id: previewLabel
+                                        Layout.fillWidth: true
+                                        wrapMode: Text.Wrap
+                                        color: previewRow.modelData.ok ? palette.text : "#e74c3c"
+                                        text: previewRow.modelData.ok
+                                              ? previewRow.modelData.title
+                                              : qsTr("Line %1: %2")
+                                                    .arg(previewRow.modelData.lineNo)
+                                                    .arg(previewRow.modelData.error)
+                                    }
+                                }
+                            }
+                        }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Label {
+                    Layout.fillWidth: true
+                    visible: text !== ""
+                    color: "#e74c3c"
+                    wrapMode: Text.WordWrap
+                    text: quickCreatePane.createError
+
+                }
+                Button {
+                    text: qsTr("Create")
+                    enabled: quickProjectName.text.trim() !== "" && !quickCreatePane.hasError
+                    onClicked: {
+                        let res = JSON.parse(quickCreate.create(
+                            quickProjectName.text, bodyArea.text,
+                            settings.quickCreateIndentTab, settings.dateFormat))
+                        if (res.ok) {
+                            quickCreatePane.createError = ""
+                            projects.refresh()
+                            tasks.refresh()
+                            tasks.projectFilter = res.projectId
+                            bodyArea.text = ""
+                            quickProjectName.text = ""
+                            root.mainView = "tasks"
+                        } else {
+                            quickCreatePane.createError = res.error
+                        }
+                    }
+                }
+            }
         }
+        }
+        }
+    }
+
+    Dialog {
+        id: formatHelpDialog
+        title: qsTr("Quick creation format")
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        width: Math.min(560, root.width - 60)
+        height: Math.min(520, root.height - 60)
+        standardButtons: Dialog.Close
+
+        contentItem: ScrollView {
+            clip: true
+            ColumnLayout {
+                width: formatHelpDialog.availableWidth
+                spacing: 8
+
+                Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    text: qsTr(
+                        "One line per task: <b>title|timeinvested|deadline|description</b>. " +
+                        "Only the title is required - leave a field empty between two “|”, " +
+                        "or write “na”, to skip it.")
+                }
+                Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    text: qsTr(
+                        "Nesting is by indentation: more indent than the line above makes it " +
+                        "a child (exactly one %1 deeper); same indent is a sibling; less " +
+                        "indent must land exactly on an earlier line's indent. Change the " +
+                        "indent unit (space or tab) in Settings.")
+                        .arg(settings.quickCreateIndentTab ? qsTr("tab") : qsTr("space"))
+                }
+                Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    text: qsTr(
+                        "Time invested is a one-off starting duration, e.g. “2h”, “45m”, " +
+                        "“2h30m” - it's shown on the task's info panel as “Initial time”, " +
+                        "never counted toward tracked time totals or the graph. " +
+                        "Deadlines use whatever date format is set in Settings.")
+                }
+                Label {
+                    Layout.fillWidth: true
+                    font.bold: true
+                    text: qsTr("Example:")
+                }
+                Label {
+                    Layout.fillWidth: true
+                    font.family: "monospace"
+                    wrapMode: Text.NoWrap
+                    text: "math homework||2025-09-30|boring maths\n" +
+                          " exercise 1|||\n" +
+                          " exercise 2|||\n" +
+                          "  exercise 2.1|||\n" +
+                          "  exercise 2.2|||\n" +
+                          "  exercise 2.3|||\n" +
+                          " exercise 3|||\n" +
+                          "english project|||essays n stuff\n" +
+                          " essay on the reading book|||\n" +
+                          " essay on the class topic|||\n" +
+                          "  draft|||\n" +
+                          "  write out on laptop|||\n" +
+                          "  print|||"
+                }
+            }
         }
     }
 }

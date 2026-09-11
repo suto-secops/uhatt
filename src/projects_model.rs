@@ -59,6 +59,11 @@ pub mod qobject {
         /// Delete the project at `row`; its tasks become unfiled.
         #[qinvokable]
         fn remove(self: Pin<&mut ProjectListModel>, row: i32);
+
+        /// Re-read from SQLite. For picking up a project created through
+        /// another QObject (e.g. quick creation).
+        #[qinvokable]
+        fn refresh(self: Pin<&mut ProjectListModel>);
     }
 
     extern "RustQt" {
@@ -130,6 +135,10 @@ impl qobject::ProjectListModel {
             self.as_mut().rust_mut().cache = projects;
             self.as_mut().end_reset_model();
         }
+    }
+
+    fn refresh(self: Pin<&mut Self>) {
+        self.reload();
     }
 
     fn add(mut self: Pin<&mut Self>, name: &QString) -> QString {
