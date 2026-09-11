@@ -1368,6 +1368,10 @@ ApplicationWindow {
 
                     contentItem: ColumnLayout {
                         spacing: 4
+                        // Above `guides` (default z) so the title/info panel
+                        // paint over a continuing tree-guide line rather than
+                        // the other way round - see the comment on `guides`.
+                        z: 1
 
                     RowLayout {
                         id: mainRow
@@ -1674,11 +1678,13 @@ ApplicationWindow {
                     // overlap in the gap between rows).
                     Item {
                         id: guides
-                        // Paint below the row's own content (the info panel
-                        // included) so a continuing line never crosses over
-                        // panel text - it's still above the delegate's
-                        // background, so the box/lines stay visible.
-                        z: -1
+                        // Default z (same as the delegate's own background).
+                        // `contentItem` above is explicitly `z: 1` so the
+                        // title/info panel still paint over a continuing
+                        // guide line - do NOT give this a negative z instead:
+                        // that sinks it below the background too (both
+                        // default to z: 0, so anything negative here goes
+                        // behind it), hiding the guides/expand box entirely.
 
                         anchors.left: parent.left
                         anchors.leftMargin: rowItem.leftPadding
