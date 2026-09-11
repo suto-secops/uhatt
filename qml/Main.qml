@@ -70,6 +70,7 @@ ApplicationWindow {
     property string mainView: "tasks"
     // Sidebar width - fixed unless the user drags the divider.
     property real sidebarWidth: 200
+
     // The calendar loads its data once at startup; re-read it each time the
     // page is opened so deadline edits made on the task list show up.
     onMainViewChanged: if (mainView === "calendar") calendar.reload()
@@ -1494,7 +1495,7 @@ ApplicationWindow {
                                 }
                                 Item { Layout.fillWidth: true }
                                 Button {
-                                    text: qsTr("Set…")
+                                    text: qsTr("Set deadline")
                                     font.pointSize: 8
                                     padding: 3
                                     focusPolicy: Qt.NoFocus
@@ -1548,6 +1549,11 @@ ApplicationWindow {
                     // overlap in the gap between rows).
                     Item {
                         id: guides
+                        // Paint below the row's own content (the info panel
+                        // included) so a continuing line never crosses over
+                        // panel text - it's still above the delegate's
+                        // background, so the box/lines stay visible.
+                        z: -1
 
                         anchors.left: parent.left
                         anchors.leftMargin: rowItem.leftPadding
@@ -2132,6 +2138,19 @@ ApplicationWindow {
                                     opacity: 0.5
                                 }
                                 Item { Layout.fillHeight: true }
+                            }
+
+                            // Today's ring: independent of the selection fill,
+                            // so today stays easy to spot while browsing.
+                            Rectangle {
+                                visible: cell.isToday
+                                anchors.fill: parent
+                                anchors.margins: 1
+                                radius: 3
+                                color: "transparent"
+                                border.width: 2
+                                border.color: palette.highlight
+                                z: 1
                             }
 
                             // Strike-through for past days: an X from corner
