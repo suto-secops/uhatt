@@ -1226,6 +1226,8 @@ ApplicationWindow {
                 Layout.topMargin: 4
                 radius: 4
                 color: Qt.rgba(palette.mid.r, palette.mid.g, palette.mid.b, 0.18)
+                border.color: palette.mid
+                border.width: 1
                 implicitHeight: emptyProjectCol.implicitHeight + 12
 
                 ColumnLayout {
@@ -2761,6 +2763,28 @@ ApplicationWindow {
                 placeholderText: qsTr("Project name")
             }
 
+            // Always-visible format reminder, so the user isn't expected to
+            // memorize the field order or open Format help every time.
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 0
+                Label {
+                    Layout.fillWidth: true
+                    font.family: "monospace"
+                    font.pointSize: 9
+                    elide: Text.ElideRight
+                    text: qsTr("title | time invested | deadline | description")
+                }
+                Label {
+                    Layout.fillWidth: true
+                    font.family: "monospace"
+                    font.pointSize: 9
+                    opacity: 0.6
+                    elide: Text.ElideRight
+                    text: qsTr("Finish painting the bike | 33:22 | 2025-09-30 | Use matte black")
+                }
+            }
+
             RowLayout {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
@@ -2914,9 +2938,11 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     wrapMode: Text.WordWrap
                     text: qsTr(
-                        "Time invested is a one-off starting duration, e.g. “2h”, “45m”, " +
-                        "“2h30m” - it's shown on the task's info panel as “Initial time”, " +
-                        "never counted toward tracked time totals or the graph. " +
+                        "Time invested is a one-off starting duration, written as " +
+                        "hours:minutes (e.g. “33:22”, or “2:30” for two and a half " +
+                        "hours) - the “2h30m” style also still works if you prefer it. " +
+                        "It's shown on the task's info panel as “Initial time”, never " +
+                        "counted toward tracked time totals or the graph. " +
                         "Deadlines use whatever date format is set in Settings.")
                 }
                 Label {
@@ -2929,7 +2955,7 @@ ApplicationWindow {
                     font.family: "monospace"
                     wrapMode: Text.NoWrap
                     text: "math homework||2025-09-30|boring maths\n" +
-                          " exercise 1\n" +
+                          " exercise 1|1:30\n" +
                           " exercise 2\n" +
                           "  exercise 2.1\n" +
                           "  exercise 2.2\n" +

@@ -119,13 +119,31 @@ pub struct TimeEntry {
 // Blank lines are skipped. Kept here, independent of any live `Settings`
 // object, so it's directly unit-testable.
 
-/// Parse a duration like `"2h"`, `"45m"`, `"2h30m"`, `"2h 30m"`, `"1.5h"` into
-/// whole seconds. A bare number with no unit is rejected - it's genuinely
-/// ambiguous (minutes? hours?) and this format fails loud, not silently.
+/// Parse a duration into whole seconds. The documented, canonical form is
+/// `H:MM` (hours:minutes, e.g. `"33:22"`) - simple enough that the format
+/// line above the quick-creation text area can show it without explanation.
+/// The older `"2h"` / `"45m"` / `"2h30m"` / `"1.5h"` suffix form still
+/// works too. A bare number with no unit or colon is rejected - it's
+/// genuinely ambiguous (minutes? hours?) and this format fails loud, not
+/// silently.
 pub fn parse_duration(s: &str) -> Result<i64, String> {
     let s = s.trim();
     if s.is_empty() {
         return Err("empty duration".to_owned());
+    }
+    if let Some((h, m)) = s.split_once(':') {
+        let hours: i64 = h
+            .trim()
+            .parse()
+            .map_err(|_| format!("bad hours in \"{s}\""))?;
+        let minutes: i64 = m
+            .trim()
+            .parse()
+            .map_err(|_| format!("bad minutes in \"{s}\""))?;
+        if !(0..60).contains(&minutes) {
+            return Err(format!("minutes must be 0-59 in \"{s}\""));
+        }
+        return Ok(hours * 3600 + minutes * 60);
     }
     let lower = s.to_ascii_lowercase();
     let mut rest = lower.as_str();
@@ -157,7 +175,7 @@ pub fn parse_duration(s: &str) -> Result<i64, String> {
     }
     if !matched {
         return Err(format!(
-            "\"{s}\" has no h/m unit - write e.g. \"2h\", \"45m\", \"2h30m\""
+            "\"{s}\" isn't a duration - write e.g. \"2:30\" (hours:minutes)"
         ));
     }
     Ok(seconds)
@@ -381,6 +399,20 @@ mod tests {
         assert!(parse_duration("").is_err());
         assert!(parse_duration("abc").is_err());
         assert!(parse_duration("2h garbage").is_err());
+    }
+
+    #[test]
+    fn duration_parses_the_canonical_colon_form() {
+        assert_eq!(parse_duration("33:22"), Ok(33 * 3600 + 22 * 60));
+        assert_eq!(parse_duration("2:30"), Ok(9000));
+        assert_eq!(parse_duration("0:05"), Ok(300));
+        assert_eq!(parse_duration(" 1:00 "), Ok(3600));
+    }
+
+    #[test]
+    fn duration_rejects_out_of_range_minutes_in_colon_form() {
+        assert!(parse_duration("2:75").is_err());
+        assert!(parse_duration("2:-5").is_err());
     }
 
     #[test]
