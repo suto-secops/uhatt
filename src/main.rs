@@ -14,8 +14,20 @@ mod timer_controller;
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QUrl};
 
+// QML's Window has no "icon" property in this build, and cxx-qt-lib has no
+// QGuiApplication::setWindowIcon/QIcon binding - set from plain C++ instead
+// (src/window_icon.cpp). `resourcePath` is a Qt resource path (leading ":",
+// not the "qrc:" URL form QML uses).
+extern "C" {
+    fn uhatt_set_window_icon(resource_path: *const std::os::raw::c_char);
+}
+
 fn main() {
     let mut app = QGuiApplication::new();
+
+    let icon_path = c":/qt/qml/dev/suto/uhatt/assets/uhatt-logo.png";
+    unsafe { uhatt_set_window_icon(icon_path.as_ptr()) };
+
     let mut engine = QQmlApplicationEngine::new();
 
     if let Some(engine) = engine.as_mut() {
