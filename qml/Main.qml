@@ -84,6 +84,7 @@ ApplicationWindow {
         case "unfiled": return tasks.countUnfiled()
         case "duetoday": return tasks.countDueToday()
         case "deadlined": return tasks.countDeadlined()
+        case "recurring": return tasks.countRecurring()
         case "finished": return tasks.countFinished()
         default: return 0
         }
@@ -1111,6 +1112,7 @@ ApplicationWindow {
                     { key: "unfiled", label: qsTr("Tasks w/o project") },
                     { key: "duetoday", label: qsTr("Due today") },
                     { key: "deadlined", label: qsTr("Deadlined") },
+                    { key: "recurring", label: qsTr("Recurrent") },
                     { key: "finished", label: qsTr("Finished") },
                 ]
                 delegate: ItemDelegate {
@@ -1552,13 +1554,20 @@ ApplicationWindow {
 
             // Read-only, derived views: no add field, no scope total. New
             // tasks would have no project / no deadline and vanish on reload.
-            // These three also prefix each row's title with its project
-            // (task #2 in the todo batch) since, unlike the other views, a
-            // row here can sit next to one from a different project.
+            // These all also identify each row's project, since a row here
+            // can sit next to one from a different project.
             readonly property bool derivedView:
                 tasks.projectFilter === "finished"
                 || tasks.projectFilter === "deadlined"
                 || tasks.projectFilter === "duetoday"
+                || tasks.projectFilter === "recurring"
+
+            // "Recurrent" shows the project name on its own line above the
+            // title (like the Recent actions page) instead of inline-
+            // prefixing the title text - it sits next to the periodicity
+            // badge and deadline, which already crowd the title on this view.
+            readonly property bool stackedProjectLabel:
+                tasks.projectFilter === "recurring"
 
             // Time recorded across everything in the current view (a project,
             // "All tasks", or the project-less ones).
@@ -1715,6 +1724,19 @@ ApplicationWindow {
                         // the other way round - see the comment on `guides`.
                         z: 1
 
+                    // "Recurrent" view only: project name on its own line
+                    // above the title (Recent actions' layout), left of the
+                    // indent so it reads as a header for the row below it.
+                    Label {
+                        visible: taskPane.stackedProjectLabel
+                        Layout.leftMargin: (rowItem.depth + 1) * 18
+                        text: rowItem.projectName !== ""
+                              ? rowItem.projectName : qsTr("W/o project")
+                        font.bold: true
+                        font.pointSize: 8
+                        opacity: 0.75
+                    }
+
                     RowLayout {
                         id: mainRow
                         Layout.fillWidth: true
@@ -1766,7 +1788,7 @@ ApplicationWindow {
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: Math.min(parent.width, implicitWidth)
                                 visible: !rowItem.editing
-                                text: (taskPane.derivedView
+                                text: (taskPane.derivedView && !taskPane.stackedProjectLabel
                                        ? (rowItem.projectName !== ""
                                           ? rowItem.projectName + ": " : qsTr("W/o project: "))
                                        : "") + rowItem.title
