@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::domain::{new_id, EntrySource, Project, ProjectFilter, Task, TaskStatus, TimeEntry};
+use crate::domain::{
+    new_id, EntrySource, Periodicity, Project, ProjectFilter, Task, TaskStatus, TimeEntry,
+};
 
 pub mod actions;
 mod migrations;
@@ -93,7 +95,7 @@ fn configure(conn: &Connection) -> rusqlite::Result<()> {
 
 const TASK_COLUMNS: &str = "id, parent_task_id, project_id, title, notes, \
                             deadline, tracked, status, sort_order, created_at, \
-                            initial_time_seconds";
+                            initial_time_seconds, periodicity";
 
 /// Trailing column appended (after the tree-annotation columns) to every
 /// [`TaskNode`]-producing query: the owning project's name, or `NULL` when
@@ -115,6 +117,7 @@ fn row_to_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         sort_order: r.get(8)?,
         created_at: r.get(9)?,
         initial_time_seconds: r.get(10)?,
+        periodicity: r.get(11)?,
     })
 }
 
@@ -213,12 +216,12 @@ fn annotate_branches(nodes: &mut [TaskNode]) {
 fn map_task_node(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskNode> {
     Ok(TaskNode {
         task: row_to_task(r)?,
-        depth: r.get::<_, i64>(11)? as u32,
-        has_children: r.get::<_, i64>(12)? != 0,
-        overdue: r.get::<_, i64>(13)? != 0,
+        depth: r.get::<_, i64>(12)? as u32,
+        has_children: r.get::<_, i64>(13)? != 0,
+        overdue: r.get::<_, i64>(14)? != 0,
         is_last_child: true,
         branch_more: Vec::new(),
-        project_name: r.get(14)?,
+        project_name: r.get(15)?,
     })
 }
 
@@ -505,6 +508,189 @@ pub fn set_task_deadline(
         }
     }
     Ok(())
+}
+
+// --- Habits (recurring tasks) ---------------------------------------------
+//
+// Backend only - not yet wired to a caller. Regeneration-on-completion (a
+// habit's whole subtree marks done and a fresh copy takes its place) and the
+// periodicity dropdown land in a follow-up PR; everything below is exercised
+// directly by this module's tests in the meantime, hence the blanket
+// `#[allow(dead_code)]`s (a function reachable only from `#[cfg(test)]` still
+// reads as dead code to the plain, non-test build).
+
+#[allow(dead_code)]
+/// Set (or clear) the periodicity set directly on this task. Does not touch
+/// any other row - a task's *effective* periodicity ([`effective_periodicity`])
+/// also considers its nearest ancestor, so reparenting a plain task under a
+/// recurring one (or out from under it) changes what it inherits without any
+/// write here.
+pub fn set_task_periodicity(
+    conn: &Connection,
+    id: &str,
+    periodicity: Option<&Periodicity>,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE tasks SET periodicity = ?2 WHERE id = ?1",
+        params![id, periodicity.map(Periodicity::to_stored)],
+    )?;
+    Ok(())
+}
+
+#[allow(dead_code)]
+/// The periodicity that governs `id`: its own if it has one, else the
+/// nearest ancestor's, else `None`. A malformed stored value (shouldn't
+/// happen - nothing free-types this) is treated as absent rather than an
+/// error.
+pub fn effective_periodicity(conn: &Connection, id: &str) -> rusqlite::Result<Option<Periodicity>> {
+    let stored: Option<String> = conn.query_row(
+        "WITH RECURSIVE up(id, parent_task_id, periodicity) AS (
+             SELECT id, parent_task_id, periodicity FROM tasks WHERE id = ?1
+           UNION ALL
+             SELECT t.id, t.parent_task_id, t.periodicity
+             FROM tasks t JOIN up ON t.id = up.parent_task_id
+             WHERE up.periodicity IS NULL
+         )
+         SELECT periodicity FROM up WHERE periodicity IS NOT NULL
+         UNION ALL SELECT NULL
+         LIMIT 1",
+        params![id],
+        |r| r.get(0),
+    )?;
+    Ok(stored.and_then(|s| Periodicity::from_stored(&s)))
+}
+
+#[allow(dead_code)]
+/// One schedule step strictly after `from`: the next date matching `spec`.
+/// Pure date arithmetic via SQLite's date functions, same idiom as
+/// [`whole_months`].
+fn step_occurrence(conn: &Connection, spec: &Periodicity, from: &str) -> rusqlite::Result<String> {
+    match spec {
+        Periodicity::EveryDays { n } => conn.query_row(
+            "SELECT date(?1, '+' || ?2 || ' days')",
+            params![from, n],
+            |r| r.get(0),
+        ),
+        Periodicity::EveryWeeks { n } => conn.query_row(
+            "SELECT date(?1, '+' || ?2 || ' days')",
+            params![from, n * 7],
+            |r| r.get(0),
+        ),
+        Periodicity::EveryMonths { n } => {
+            // Not a plain `date(from, '+n months')`: SQLite doesn't clamp an
+            // out-of-range day into the target month, it overflows into the
+            // month after (`'2026-01-31' + 1 month` is `'2026-03-03'`, not
+            // `'2026-02-28'`). Clamp to the target month's own last day
+            // instead, same spirit as `whole_months`.
+            let day: i64 = conn.query_row(
+                "SELECT CAST(strftime('%d', ?1) AS INTEGER)",
+                params![from],
+                |r| r.get(0),
+            )?;
+            let target_first: String = conn.query_row(
+                "SELECT date(?1, 'start of month', '+' || ?2 || ' months')",
+                params![from, n],
+                |r| r.get(0),
+            )?;
+            let target_last_day: i64 = conn.query_row(
+                "SELECT CAST(strftime('%d', date(?1, '+1 month', '-1 day')) AS INTEGER)",
+                params![target_first],
+                |r| r.get(0),
+            )?;
+            conn.query_row(
+                "SELECT date(?1, '+' || ?2 || ' days')",
+                params![target_first, day.min(target_last_day) - 1],
+                |r| r.get(0),
+            )
+        }
+        Periodicity::Weekdays { days } => {
+            // The next of the following 7 days whose ISO weekday (1 = Monday
+            // .. 7 = Sunday) is in `days` - always found since `days` is
+            // never empty.
+            for offset in 1..=7 {
+                let candidate: String = conn.query_row(
+                    "SELECT date(?1, '+' || ?2 || ' days')",
+                    params![from, offset],
+                    |r| r.get(0),
+                )?;
+                let weekday: i64 = conn.query_row(
+                    "SELECT CAST(strftime('%u', ?1) AS INTEGER)",
+                    params![candidate],
+                    |r| r.get(0),
+                )?;
+                if days.contains(&(weekday as u8)) {
+                    return Ok(candidate);
+                }
+            }
+            unreachable!("Periodicity::Weekdays.days is never empty")
+        }
+        Periodicity::FirstOfMonth => conn.query_row(
+            "SELECT date(?1, 'start of month', '+1 month')",
+            params![from],
+            |r| r.get(0),
+        ),
+        Periodicity::LastOfMonth => {
+            let this_month_last: String = conn.query_row(
+                "SELECT date(?1, 'start of month', '+1 month', '-1 day')",
+                params![from],
+                |r| r.get(0),
+            )?;
+            if this_month_last.as_str() > from {
+                Ok(this_month_last)
+            } else {
+                conn.query_row(
+                    "SELECT date(?1, 'start of month', '+2 month', '-1 day')",
+                    params![from],
+                    |r| r.get(0),
+                )
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
+/// Advance from `deadline` one schedule step at a time, past every occurrence
+/// that has already come and gone (`<= today`), stopping at the first one
+/// still ahead. Returns that occurrence plus how many were skipped to reach
+/// it - the "missed" count is `0` when the task is on time or was completed
+/// early (the immediate next occurrence is already in the future).
+fn advance_schedule(
+    conn: &Connection,
+    spec: &Periodicity,
+    deadline: &str,
+    today: &str,
+) -> rusqlite::Result<(String, i64)> {
+    let mut next = step_occurrence(conn, spec, deadline)?;
+    let mut missed = 0i64;
+    while next.as_str() <= today {
+        missed += 1;
+        next = step_occurrence(conn, spec, &next)?;
+    }
+    Ok((next, missed))
+}
+
+#[allow(dead_code)]
+/// The next occurrence of `spec` after `deadline` that isn't already in the
+/// past relative to `today` - see [`advance_schedule`].
+pub fn next_occurrence(
+    conn: &Connection,
+    spec: &Periodicity,
+    deadline: &str,
+    today: &str,
+) -> rusqlite::Result<String> {
+    Ok(advance_schedule(conn, spec, deadline, today)?.0)
+}
+
+#[allow(dead_code)]
+/// How many scheduled occurrences of `spec` fell in `(deadline, today]` -
+/// i.e. how many times this habit has been missed while stuck on `deadline`.
+pub fn missed_occurrences(
+    conn: &Connection,
+    spec: &Periodicity,
+    deadline: &str,
+    today: &str,
+) -> rusqlite::Result<i64> {
+    Ok(advance_schedule(conn, spec, deadline, today)?.1)
 }
 
 // --- Deadline countdown --------------------------------------------------
@@ -1550,6 +1736,204 @@ mod tests {
                 .task
                 .id,
             a.id
+        );
+    }
+
+    #[test]
+    fn periodicity_round_trips_through_json() {
+        use Periodicity::*;
+        let cases = [
+            EveryDays { n: 3 },
+            EveryWeeks { n: 2 },
+            EveryMonths { n: 1 },
+            Weekdays {
+                days: vec![1, 3, 5],
+            },
+            FirstOfMonth,
+            LastOfMonth,
+        ];
+        for p in cases {
+            assert_eq!(Periodicity::from_stored(&p.to_stored()), Some(p));
+        }
+    }
+
+    #[test]
+    fn set_task_periodicity_persists_and_clears() {
+        let conn = open_in_memory().unwrap();
+        let t = root(&conn, "Habit");
+        assert_eq!(get_task(&conn, &t.id).unwrap().unwrap().periodicity, None);
+
+        let spec = Periodicity::EveryDays { n: 2 };
+        set_task_periodicity(&conn, &t.id, Some(&spec)).unwrap();
+        assert_eq!(
+            get_task(&conn, &t.id)
+                .unwrap()
+                .unwrap()
+                .periodicity
+                .as_deref(),
+            Some(spec.to_stored().as_str())
+        );
+
+        set_task_periodicity(&conn, &t.id, None).unwrap();
+        assert_eq!(get_task(&conn, &t.id).unwrap().unwrap().periodicity, None);
+    }
+
+    #[test]
+    fn effective_periodicity_walks_to_the_nearest_ancestor() {
+        let conn = open_in_memory().unwrap();
+        let grandparent = root(&conn, "G");
+        let parent = child(&conn, "P", &grandparent.id);
+        let kid = child(&conn, "K", &parent.id);
+
+        // Nobody has one yet.
+        assert_eq!(effective_periodicity(&conn, &kid.id).unwrap(), None);
+
+        // Grandparent sets one - parent and kid both inherit it.
+        let weekly = Periodicity::EveryWeeks { n: 1 };
+        set_task_periodicity(&conn, &grandparent.id, Some(&weekly)).unwrap();
+        assert_eq!(
+            effective_periodicity(&conn, &kid.id).unwrap(),
+            Some(weekly.clone())
+        );
+        assert_eq!(
+            effective_periodicity(&conn, &parent.id).unwrap(),
+            Some(weekly.clone())
+        );
+
+        // Parent sets its own (nearer) periodicity - kid now sees the
+        // parent's, not the grandparent's.
+        let daily = Periodicity::EveryDays { n: 1 };
+        set_task_periodicity(&conn, &parent.id, Some(&daily)).unwrap();
+        assert_eq!(effective_periodicity(&conn, &kid.id).unwrap(), Some(daily));
+
+        // Clearing the parent's own periodicity falls back to the
+        // grandparent's again.
+        set_task_periodicity(&conn, &parent.id, None).unwrap();
+        assert_eq!(effective_periodicity(&conn, &kid.id).unwrap(), Some(weekly));
+    }
+
+    #[test]
+    fn next_occurrence_advances_past_missed_and_stops_ahead() {
+        let conn = open_in_memory().unwrap();
+        let every3 = Periodicity::EveryDays { n: 3 };
+        let deadline = "2026-09-01";
+
+        // Completed early: due 09-04, done well before it.
+        assert_eq!(
+            next_occurrence(&conn, &every3, deadline, "2026-09-02").unwrap(),
+            "2026-09-04"
+        );
+        assert_eq!(
+            missed_occurrences(&conn, &every3, deadline, "2026-09-02").unwrap(),
+            0
+        );
+
+        // On time: done exactly on the old deadline.
+        assert_eq!(
+            next_occurrence(&conn, &every3, deadline, deadline).unwrap(),
+            "2026-09-04"
+        );
+
+        // Late by one occurrence.
+        assert_eq!(
+            next_occurrence(&conn, &every3, deadline, "2026-09-05").unwrap(),
+            "2026-09-07"
+        );
+        assert_eq!(
+            missed_occurrences(&conn, &every3, deadline, "2026-09-05").unwrap(),
+            1
+        );
+
+        // Very late: several occurrences skipped in one jump, not spawned
+        // one by one.
+        assert_eq!(
+            next_occurrence(&conn, &every3, deadline, "2026-09-11").unwrap(),
+            "2026-09-13"
+        );
+        assert_eq!(
+            missed_occurrences(&conn, &every3, deadline, "2026-09-11").unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn next_occurrence_for_weekdays_never_drifts_to_the_completion_date() {
+        let conn = open_in_memory().unwrap();
+        // Whatever ISO weekday 2026-09-07 actually is - the schedule is
+        // "that weekday, every week", not tied to a specific calendar fact.
+        let anchor = "2026-09-07";
+        let anchor_weekday: i64 = conn
+            .query_row(
+                "SELECT CAST(strftime('%u', ?1) AS INTEGER)",
+                params![anchor],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let weekly = Periodicity::Weekdays {
+            days: vec![anchor_weekday as u8],
+        };
+        let next_week: String = conn
+            .query_row("SELECT date(?1, '+7 days')", params![anchor], |r| r.get(0))
+            .unwrap();
+
+        // Completed the same day it was due.
+        assert_eq!(
+            next_occurrence(&conn, &weekly, anchor, anchor).unwrap(),
+            next_week
+        );
+        // Completed a couple of days late, still inside the same week - still
+        // lands on the same upcoming occurrence, not "N days after completion".
+        let late: String = conn
+            .query_row("SELECT date(?1, '+2 days')", params![anchor], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            next_occurrence(&conn, &weekly, anchor, &late).unwrap(),
+            next_week
+        );
+    }
+
+    #[test]
+    fn next_occurrence_for_months_and_month_boundaries() {
+        let conn = open_in_memory().unwrap();
+
+        // SQLite's `date(...,'+1 month')` clamps into a shorter month.
+        let monthly = Periodicity::EveryMonths { n: 1 };
+        assert_eq!(
+            next_occurrence(&conn, &monthly, "2026-01-31", "2026-01-31").unwrap(),
+            "2026-02-28"
+        );
+
+        assert_eq!(
+            next_occurrence(
+                &conn,
+                &Periodicity::FirstOfMonth,
+                "2026-01-01",
+                "2026-01-01"
+            )
+            .unwrap(),
+            "2026-02-01"
+        );
+        assert_eq!(
+            next_occurrence(
+                &conn,
+                &Periodicity::FirstOfMonth,
+                "2026-01-15",
+                "2026-01-15"
+            )
+            .unwrap(),
+            "2026-02-01"
+        );
+
+        // From the last day of the month itself, jumps to next month's last day.
+        assert_eq!(
+            next_occurrence(&conn, &Periodicity::LastOfMonth, "2026-01-31", "2026-01-31").unwrap(),
+            "2026-02-28"
+        );
+        // From a mid-month date, this month's own last day still counts as
+        // "strictly after".
+        assert_eq!(
+            next_occurrence(&conn, &Periodicity::LastOfMonth, "2026-01-15", "2026-01-15").unwrap(),
+            "2026-01-31"
         );
     }
 
