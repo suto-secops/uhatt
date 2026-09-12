@@ -57,11 +57,55 @@ pub struct Task {
     /// import), in seconds. Purely informational - never summed into time
     /// totals or the heatmap, never backed by a `time_entries` row.
     pub initial_time_seconds: Option<i64>,
+    /// JSON-encoded [`Periodicity`], or `None` if this task doesn't have one
+    /// set directly. A task is part of a recurring habit when it or its
+    /// nearest ancestor has one - `Task` only stores what's set on this row;
+    /// resolving "is this task recurring" walks the tree (see
+    /// `db::effective_periodicity`).
+    pub periodicity: Option<String>,
 }
 
 impl Task {
     pub fn is_done(&self) -> bool {
         self.status == TaskStatus::Done
+    }
+}
+
+/// How often a habit task repeats. Stored on `Task.periodicity` as JSON
+/// (`Periodicity::to_stored`/`from_stored`) rather than free text - unlike
+/// deadlines, nothing types this by hand; the UI will construct a value
+/// directly rather than parsing one.
+// Not yet wired to a caller (regeneration-on-completion + the periodicity
+// dropdown land in the next PR) - only exercised by this module's tests so
+// far.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind")]
+pub enum Periodicity {
+    #[serde(rename = "days")]
+    EveryDays { n: u32 },
+    #[serde(rename = "weeks")]
+    EveryWeeks { n: u32 },
+    #[serde(rename = "months")]
+    EveryMonths { n: u32 },
+    /// Specific weekdays, ISO numbering (1 = Monday .. 7 = Sunday, matching
+    /// SQLite's `strftime('%u', ...)`). Never empty.
+    #[serde(rename = "weekdays")]
+    Weekdays { days: Vec<u8> },
+    #[serde(rename = "first_of_month")]
+    FirstOfMonth,
+    #[serde(rename = "last_of_month")]
+    LastOfMonth,
+}
+
+#[allow(dead_code)]
+impl Periodicity {
+    pub fn to_stored(&self) -> String {
+        serde_json::to_string(self).expect("Periodicity always serializes")
+    }
+
+    pub fn from_stored(s: &str) -> Option<Self> {
+        serde_json::from_str(s).ok()
     }
 }
 

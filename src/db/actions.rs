@@ -250,6 +250,7 @@ struct TaskSnapshot {
     sort_order: f64,
     created_at: String,
     initial_time_seconds: Option<i64>,
+    periodicity: Option<String>,
     completed_at: Option<String>,
 }
 
@@ -268,7 +269,8 @@ fn row_to_task_snapshot(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskSnapshot>
         sort_order: r.get(8)?,
         created_at: r.get(9)?,
         initial_time_seconds: r.get(10)?,
-        completed_at: r.get(11)?,
+        periodicity: r.get(11)?,
+        completed_at: r.get(12)?,
     })
 }
 
@@ -532,8 +534,8 @@ fn apply_one(conn: &Connection, action_id: i64) -> rusqlite::Result<()> {
                 conn.execute(
                     "INSERT INTO tasks (id, parent_task_id, project_id, title, notes, deadline,
                                          tracked, status, completed_at, sort_order, created_at,
-                                         initial_time_seconds)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                                         initial_time_seconds, periodicity)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                     params![
                         t.id,
                         parent,
@@ -547,6 +549,7 @@ fn apply_one(conn: &Connection, action_id: i64) -> rusqlite::Result<()> {
                         t.sort_order,
                         t.created_at,
                         t.initial_time_seconds,
+                        t.periodicity,
                     ],
                 )?;
             }
@@ -610,6 +613,7 @@ pub fn revert_from(conn: &Connection, id: i64) -> rusqlite::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::Periodicity;
 
     fn root(conn: &Connection, title: &str) -> Task {
         super::super::create_task(conn, title, None, None).unwrap()
@@ -851,6 +855,8 @@ mod tests {
             "worked",
         )
         .unwrap();
+        let weekly = Periodicity::EveryWeeks { n: 1 };
+        super::super::set_task_periodicity(&conn, &parent.id, Some(&weekly)).unwrap();
 
         capture_and_log_delete(&conn, &parent.id).unwrap();
         super::super::delete_task(&conn, &parent.id).unwrap();
@@ -861,12 +867,11 @@ mod tests {
         let id = only_action_id(&conn);
         revert_action(&conn, id).unwrap();
 
+        let restored_parent = super::super::get_task(&conn, &parent.id).unwrap().unwrap();
+        assert_eq!(restored_parent.title, "parent");
         assert_eq!(
-            super::super::get_task(&conn, &parent.id)
-                .unwrap()
-                .unwrap()
-                .title,
-            "parent"
+            restored_parent.periodicity.as_deref(),
+            Some(weekly.to_stored().as_str())
         );
         let restored_kid = super::super::get_task(&conn, &kid.id).unwrap().unwrap();
         assert_eq!(restored_kid.parent_id, Some(parent.id.clone()));

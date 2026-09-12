@@ -6,7 +6,7 @@
 
 use rusqlite::Connection;
 
-pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
+pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6];
 
 /// Number of migration steps the code expects the database to be at.
 pub const COUNT: usize = MIGRATIONS.len();
@@ -121,4 +121,12 @@ ALTER TABLE tasks ADD COLUMN initial_time_seconds INTEGER;
 // top level rather than deleting them.
 const V5: &str = r#"
 ALTER TABLE projects ADD COLUMN parent_project_id TEXT REFERENCES projects(id) ON DELETE SET NULL;
+"#;
+
+// Habits: a task can repeat on a schedule (`domain::Periodicity`, stored as
+// JSON). A task without one of its own is still part of a recurring habit
+// when its nearest ancestor has one - this column only records what's set
+// directly on this row.
+const V6: &str = r#"
+ALTER TABLE tasks ADD COLUMN periodicity TEXT;
 "#;
