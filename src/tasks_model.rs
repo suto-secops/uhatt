@@ -17,7 +17,7 @@ use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QStri
 use rusqlite::Connection;
 
 use crate::db::{self, TaskNode};
-use crate::domain::{ProjectFilter, Task, TaskStatus};
+use crate::domain::{Periodicity, ProjectFilter, Task, TaskStatus};
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -200,6 +200,54 @@ pub mod qobject {
         #[cxx_name = "setDeadline"]
         fn set_deadline(self: Pin<&mut TaskListModel>, row: i32, deadline: &QString);
 
+        // ---- Habits (periodicity dropdown, under the deadline row) --------
+
+        /// This task's own periodicity kind code (`0` = Off / not set,
+        /// `1..=6` per `Periodicity::kind_code`) - never the inherited one,
+        /// since the dropdown always edits what's set directly on this row.
+        #[qinvokable]
+        #[cxx_name = "periodicityKind"]
+        fn periodicity_kind(self: &TaskListModel, row: i32) -> i32;
+
+        /// The `n` in "every n days/weeks/months" for this task's own
+        /// periodicity, or `0` when not applicable.
+        #[qinvokable]
+        #[cxx_name = "periodicityN"]
+        fn periodicity_n(self: &TaskListModel, row: i32) -> i32;
+
+        /// This task's own weekday selection as `"1,3,5"` (ISO numbering,
+        /// 1 = Monday), or `""` when not applicable.
+        #[qinvokable]
+        #[cxx_name = "periodicityWeekdays"]
+        fn periodicity_weekdays(self: &TaskListModel, row: i32) -> QString;
+
+        /// A human summary of what governs this task - its own periodicity,
+        /// or its nearest ancestor's with " (from <ancestor's title>)"
+        /// appended, or "" when it isn't part of a habit at all.
+        #[qinvokable]
+        #[cxx_name = "effectivePeriodicityText"]
+        fn effective_periodicity_text(self: &TaskListModel, row: i32) -> QString;
+
+        /// How many scheduled occurrences have already passed while this
+        /// task sat on its current deadline - `0` when it isn't a habit, has
+        /// no deadline yet, or is on time.
+        #[qinvokable]
+        #[cxx_name = "missedCount"]
+        fn missed_count(self: &TaskListModel, row: i32) -> i32;
+
+        /// Set (`kind > 0`) or clear (`kind <= 0`) the periodicity on the
+        /// task at `row` directly - see `Periodicity::from_parts` for how
+        /// `kind`/`n`/`weekdays` combine.
+        #[qinvokable]
+        #[cxx_name = "setPeriodicity"]
+        fn set_periodicity(
+            self: Pin<&mut TaskListModel>,
+            row: i32,
+            kind: i32,
+            n: i32,
+            weekdays: &QString,
+        );
+
         /// Collapse an expanded task or expand a collapsed one.
         #[qinvokable]
         #[cxx_name = "toggleExpanded"]
@@ -319,6 +367,30 @@ fn human_hm(secs: i64) -> String {
         format!("{m}m")
     } else {
         format!("{h}h {m:02}m")
+    }
+}
+
+/// A human summary of a periodicity, for the "governed by" note under the
+/// deadline row.
+fn periodicity_summary(p: &Periodicity) -> String {
+    match p {
+        Periodicity::EveryDays { n: 1 } => "Every day".to_owned(),
+        Periodicity::EveryDays { n } => format!("Every {n} days"),
+        Periodicity::EveryWeeks { n: 1 } => "Every week".to_owned(),
+        Periodicity::EveryWeeks { n } => format!("Every {n} weeks"),
+        Periodicity::EveryMonths { n: 1 } => "Every month".to_owned(),
+        Periodicity::EveryMonths { n } => format!("Every {n} months"),
+        Periodicity::Weekdays { days } => {
+            const NAMES: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+            let names: Vec<&str> = days
+                .iter()
+                .filter_map(|&d| NAMES.get(usize::from(d.saturating_sub(1))))
+                .copied()
+                .collect();
+            format!("Every {}", names.join(", "))
+        }
+        Periodicity::FirstOfMonth => "First of the month".to_owned(),
+        Periodicity::LastOfMonth => "Last of the month".to_owned(),
     }
 }
 
@@ -561,6 +633,14 @@ impl qobject::TaskListModel {
     fn revert_selected(mut self: Pin<&mut Self>) {
         let ids: Vec<String> = self.selected.iter().cloned().collect();
         for id in &ids {
+            match db::actions::revert_habit_completion(self.db_conn(), id) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(e) => {
+                    eprintln!("uhatt: revert habit completion failed for {id}: {e}");
+                    continue;
+                }
+            }
             let before = self.task_before(id);
             if let Err(e) = db::set_task_status(self.db_conn(), id, TaskStatus::Todo) {
                 eprintln!("uhatt: bulk revert failed for {id}: {e}");
@@ -734,6 +814,29 @@ impl qobject::TaskListModel {
         let Some(id) = self.id_at(row) else {
             return;
         };
+        if done {
+            // A habit's regeneration unit is its whole subtree, not just this
+            // task - see `db::actions::complete_recurring_task`.
+            if let Ok(Some(spec)) = db::effective_periodicity(self.db_conn(), &id) {
+                if let Err(e) = db::actions::complete_recurring_task(self.db_conn(), &id, &spec) {
+                    eprintln!("uhatt: complete recurring task failed: {e}");
+                }
+                self.reload();
+                return;
+            }
+        } else {
+            match db::actions::revert_habit_completion(self.db_conn(), &id) {
+                Ok(true) => {
+                    self.reload();
+                    return;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    eprintln!("uhatt: revert habit completion failed: {e}");
+                    return;
+                }
+            }
+        }
         let status = if done {
             TaskStatus::Done
         } else {
@@ -853,6 +956,67 @@ impl qobject::TaskListModel {
                     eprintln!("uhatt: log set_deadline failed: {e}");
                 }
             }
+        }
+        self.reload();
+    }
+
+    /// This row's own periodicity (not the effective/inherited one) - the
+    /// dropdown always edits what's set directly on this task.
+    fn own_periodicity(&self, row: i32) -> Option<Periodicity> {
+        self.node_at(row)
+            .and_then(|n| n.task.periodicity.as_deref())
+            .and_then(Periodicity::from_stored)
+    }
+
+    fn periodicity_kind(&self, row: i32) -> i32 {
+        self.own_periodicity(row).map_or(0, |p| p.kind_code())
+    }
+
+    fn periodicity_n(&self, row: i32) -> i32 {
+        self.own_periodicity(row).map_or(0, |p| p.n())
+    }
+
+    fn periodicity_weekdays(&self, row: i32) -> QString {
+        let text = self
+            .own_periodicity(row)
+            .map_or_else(String::new, |p| p.weekdays_csv());
+        QString::from(text.as_str())
+    }
+
+    fn effective_periodicity_text(&self, row: i32) -> QString {
+        let Some(id) = self.id_at(row) else {
+            return QString::default();
+        };
+        let text = match db::effective_periodicity(self.db_conn(), &id) {
+            Ok(Some(p)) => periodicity_summary(&p),
+            _ => String::new(),
+        };
+        QString::from(text.as_str())
+    }
+
+    fn missed_count(&self, row: i32) -> i32 {
+        let Some(node) = self.node_at(row) else {
+            return 0;
+        };
+        let Some(deadline) = node.task.deadline.as_deref() else {
+            return 0;
+        };
+        let Ok(Some(spec)) = db::effective_periodicity(self.db_conn(), &node.task.id) else {
+            return 0;
+        };
+        let today = crate::db::today_string(self.db_conn()).unwrap_or_default();
+        db::missed_occurrences(self.db_conn(), &spec, deadline, &today).unwrap_or(0) as i32
+    }
+
+    fn set_periodicity(self: Pin<&mut Self>, row: i32, kind: i32, n: i32, weekdays: &QString) {
+        let Some(id) = self.id_at(row) else {
+            return;
+        };
+        let weekdays = weekdays.to_string();
+        let spec = Periodicity::from_parts(kind, n, &weekdays);
+        if let Err(e) = db::set_task_periodicity(self.db_conn(), &id, spec.as_ref()) {
+            eprintln!("uhatt: set periodicity failed: {e}");
+            return;
         }
         self.reload();
     }

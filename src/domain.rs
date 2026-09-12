@@ -75,10 +75,6 @@ impl Task {
 /// (`Periodicity::to_stored`/`from_stored`) rather than free text - unlike
 /// deadlines, nothing types this by hand; the UI will construct a value
 /// directly rather than parsing one.
-// Not yet wired to a caller (regeneration-on-completion + the periodicity
-// dropdown land in the next PR) - only exercised by this module's tests so
-// far.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind")]
 pub enum Periodicity {
@@ -98,7 +94,6 @@ pub enum Periodicity {
     LastOfMonth,
 }
 
-#[allow(dead_code)]
 impl Periodicity {
     pub fn to_stored(&self) -> String {
         serde_json::to_string(self).expect("Periodicity always serializes")
@@ -106,6 +101,63 @@ impl Periodicity {
 
     pub fn from_stored(s: &str) -> Option<Self> {
         serde_json::from_str(s).ok()
+    }
+
+    /// A stable small integer for the QML periodicity dropdown's
+    /// `currentIndex` (`0` = "Off" isn't a variant here - the QML side uses
+    /// `None` for that; these are `1..=6`, in the same order QML lists them).
+    pub fn kind_code(&self) -> i32 {
+        match self {
+            Periodicity::EveryDays { .. } => 1,
+            Periodicity::EveryWeeks { .. } => 2,
+            Periodicity::EveryMonths { .. } => 3,
+            Periodicity::Weekdays { .. } => 4,
+            Periodicity::FirstOfMonth => 5,
+            Periodicity::LastOfMonth => 6,
+        }
+    }
+
+    /// The `n` in "every n days/weeks/months", or `0` for a kind that has none.
+    pub fn n(&self) -> i32 {
+        match self {
+            Periodicity::EveryDays { n }
+            | Periodicity::EveryWeeks { n }
+            | Periodicity::EveryMonths { n } => *n as i32,
+            _ => 0,
+        }
+    }
+
+    /// Comma-separated ISO weekday numbers (`"1,3,5"`), or `""` for any other kind.
+    pub fn weekdays_csv(&self) -> String {
+        match self {
+            Periodicity::Weekdays { days } => {
+                days.iter().map(u8::to_string).collect::<Vec<_>>().join(",")
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// The inverse of `kind_code`/`n`/`weekdays_csv` - what the QML dropdown
+    /// hands back on a change. `None` for `kind <= 0` (Off) or a `Weekdays`
+    /// selection with nothing ticked; `n` below `1` is clamped up to `1`.
+    pub fn from_parts(kind: i32, n: i32, weekdays_csv: &str) -> Option<Self> {
+        let n = n.max(1) as u32;
+        match kind {
+            1 => Some(Periodicity::EveryDays { n }),
+            2 => Some(Periodicity::EveryWeeks { n }),
+            3 => Some(Periodicity::EveryMonths { n }),
+            4 => {
+                let days: Vec<u8> = weekdays_csv
+                    .split(',')
+                    .filter_map(|s| s.trim().parse::<u8>().ok())
+                    .filter(|d| (1..=7).contains(d))
+                    .collect();
+                (!days.is_empty()).then_some(Periodicity::Weekdays { days })
+            }
+            5 => Some(Periodicity::FirstOfMonth),
+            6 => Some(Periodicity::LastOfMonth),
+            _ => None,
+        }
     }
 }
 
