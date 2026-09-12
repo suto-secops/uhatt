@@ -408,6 +408,54 @@ pub fn list_due_today_tree(conn: &Connection) -> rusqlite::Result<Vec<TaskNode>>
     Ok(nodes)
 }
 
+/// The task tree pruned to periodicity-bearing work: a task is kept when it
+/// has its *own* periodicity set - the root of a recurring subtree, per
+/// [`effective_periodicity`]'s nearest-ancestor-wins rule, not every task
+/// that merely inherits one - or any descendant does (same ancestor-chain-
+/// preserving rule and done-task branch truncation as [`list_deadlined_tree`]).
+pub fn list_recurring_tree(conn: &Connection) -> rusqlite::Result<Vec<TaskNode>> {
+    let sql = format!(
+        "WITH RECURSIVE
+             keep(id) AS (
+                 SELECT id FROM tasks
+                 WHERE periodicity IS NOT NULL AND status <> 'done'
+               UNION
+                 SELECT t.parent_task_id
+                 FROM tasks t JOIN keep k ON t.id = k.id
+                 WHERE t.parent_task_id IS NOT NULL AND t.status <> 'done'
+             ),
+             subtree(task_id, depth, sort_path) AS (
+                 SELECT id, 0, printf('%020.6f', sort_order)
+                 FROM tasks
+                 WHERE parent_task_id IS NULL AND status <> 'done'
+                   AND id IN (SELECT id FROM keep)
+               UNION ALL
+                 SELECT t.id, s.depth + 1,
+                        s.sort_path || '/' || printf('%020.6f', t.sort_order)
+                 FROM tasks t JOIN subtree s ON t.parent_task_id = s.task_id
+                 WHERE t.status <> 'done'
+                   AND t.id IN (SELECT id FROM keep)
+             )
+         SELECT {TASK_COLUMNS},
+                subtree.depth,
+                EXISTS(SELECT 1 FROM tasks c
+                       WHERE c.parent_task_id = tasks.id
+                         AND c.status <> 'done'
+                         AND c.id IN (SELECT id FROM keep)),
+                (tasks.deadline IS NOT NULL
+                    AND tasks.deadline < {TODAY}
+                    AND tasks.status <> 'done'),
+                {PROJECT_NAME_SUBQUERY}
+         FROM tasks JOIN subtree ON tasks.id = subtree.task_id
+         ORDER BY subtree.sort_path"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], map_task_node)?;
+    let mut nodes: Vec<TaskNode> = rows.collect::<rusqlite::Result<_>>()?;
+    annotate_branches(&mut nodes);
+    Ok(nodes)
+}
+
 /// A task that has a deadline, for the calendar / agenda page.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeadlineItem {
@@ -2068,6 +2116,30 @@ mod tests {
         set_task_status(&conn, &c.id, TaskStatus::Done).unwrap();
 
         let tree = list_due_today_tree(&conn).unwrap();
+        let titles: Vec<_> = tree.iter().map(|n| n.task.title.as_str()).collect();
+        assert_eq!(titles, ["A", "A1"]);
+    }
+
+    #[test]
+    fn recurring_tree_keeps_only_periodicity_roots_and_their_ancestors() {
+        let conn = open_in_memory().unwrap();
+
+        let a = root(&conn, "A");
+        let a1 = child(&conn, "A1", &a.id);
+        child(&conn, "A1a", &a1.id); // inherits A1's periodicity, not its own -> dropped
+        set_task_periodicity(&conn, &a1.id, Some(&Periodicity::EveryDays { n: 2 })).unwrap();
+
+        let b = root(&conn, "B"); // no periodicity anywhere -> dropped entirely
+        child(&conn, "B1", &b.id);
+
+        // A periodicity buried under a done parent stays hidden, same rule as
+        // `list_deadlined_tree`.
+        let c = root(&conn, "C");
+        let c1 = child(&conn, "C1", &c.id);
+        set_task_periodicity(&conn, &c1.id, Some(&Periodicity::EveryWeeks { n: 1 })).unwrap();
+        set_task_status(&conn, &c.id, TaskStatus::Done).unwrap();
+
+        let tree = list_recurring_tree(&conn).unwrap();
         let titles: Vec<_> = tree.iter().map(|n| n.task.title.as_str()).collect();
         assert_eq!(titles, ["A", "A1"]);
     }

@@ -288,6 +288,11 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "countFinished"]
         fn count_finished(self: &TaskListModel) -> i32;
+
+        /// Count of tasks shown on the "Recurrent" view.
+        #[qinvokable]
+        #[cxx_name = "countRecurring"]
+        fn count_recurring(self: &TaskListModel) -> i32;
     }
 
     // QAbstractListModel overrides.
@@ -356,6 +361,10 @@ const DEADLINED: &str = "deadlined";
 /// The special `projectFilter` value for tasks due the current local day
 /// (same ancestor-chain-preserving rule as [`DEADLINED`]).
 const DUE_TODAY: &str = "duetoday";
+/// The special `projectFilter` value for periodicity-bearing tasks (same
+/// ancestor-chain-preserving rule as [`DEADLINED`], but keyed on a task's own
+/// periodicity rather than its deadline).
+const RECURRING: &str = "recurring";
 
 /// Seconds as `"0m"` / `"45m"` / `"6h 20m"`, for the view total line.
 fn human_hm(secs: i64) -> String {
@@ -481,21 +490,25 @@ impl qobject::TaskListModel {
             db::list_deadlined_tree(self.db_conn())
         } else if filter_str == DUE_TODAY {
             db::list_due_today_tree(self.db_conn())
+        } else if filter_str == RECURRING {
+            db::list_recurring_tree(self.db_conn())
         } else {
             db::list_task_tree(self.db_conn(), &parse_filter(&filter_str), self.show_done)
         }
         .unwrap_or_default();
         // Time total for the current scope; blank on the ad-hoc views
-        // (finished / deadlined / due-today) where a scope total isn't
-        // meaningful.
-        let view_total =
-            if filter_str == FINISHED || filter_str == DEADLINED || filter_str == DUE_TODAY {
-                String::new()
-            } else {
-                let secs =
-                    db::scope_seconds(self.db_conn(), &parse_filter(&filter_str)).unwrap_or(0);
-                human_hm(secs)
-            };
+        // (finished / deadlined / due-today / recurring) where a scope total
+        // isn't meaningful.
+        let view_total = if filter_str == FINISHED
+            || filter_str == DEADLINED
+            || filter_str == DUE_TODAY
+            || filter_str == RECURRING
+        {
+            String::new()
+        } else {
+            let secs = db::scope_seconds(self.db_conn(), &parse_filter(&filter_str)).unwrap_or(0);
+            human_hm(secs)
+        };
 
         let live: HashSet<&str> = tree.iter().map(|n| n.task.id.as_str()).collect();
         let collapsed: HashSet<String> = self
@@ -672,6 +685,7 @@ impl qobject::TaskListModel {
             || filter_str == FINISHED
             || filter_str == DEADLINED
             || filter_str == DUE_TODAY
+            || filter_str == RECURRING
         {
             return;
         }
@@ -1088,6 +1102,12 @@ impl qobject::TaskListModel {
 
     fn count_finished(&self) -> i32 {
         db::list_finished_tasks(self.db_conn())
+            .map(|v| v.len() as i32)
+            .unwrap_or(0)
+    }
+
+    fn count_recurring(&self) -> i32 {
+        db::list_recurring_tree(self.db_conn())
             .map(|v| v.len() as i32)
             .unwrap_or(0)
     }
