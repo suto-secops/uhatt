@@ -77,6 +77,18 @@ ApplicationWindow {
         }
     }
 
+    // Sidebar task count for a "Views" entry's `projectFilter` key.
+    function viewTaskCount(key) {
+        switch (key) {
+        case "": return tasks.countAll()
+        case "unfiled": return tasks.countUnfiled()
+        case "duetoday": return tasks.countDueToday()
+        case "deadlined": return tasks.countDeadlined()
+        case "finished": return tasks.countFinished()
+        default: return 0
+        }
+    }
+
     // `baseSecs` of already-counted time plus the live segment since `sinceIso`
     // (pass "" for a paused timer), as HH:MM:SS.
     function fmtElapsed(baseSecs, sinceIso) {
@@ -1068,18 +1080,32 @@ ApplicationWindow {
                 model: [
                     { key: "", label: qsTr("All tasks") },
                     { key: "unfiled", label: qsTr("Tasks w/o project") },
+                    { key: "duetoday", label: qsTr("Due today") },
                     { key: "deadlined", label: qsTr("Deadlined") },
                     { key: "finished", label: qsTr("Finished") },
                 ]
                 delegate: ItemDelegate {
                     required property var modelData
                     Layout.fillWidth: true
-                    text: modelData.label
                     highlighted: root.mainView === "tasks"
                                  && tasks.projectFilter === modelData.key
                     onClicked: {
                         tasks.projectFilter = modelData.key
                         root.mainView = "tasks"
+                    }
+                    contentItem: RowLayout {
+                        Label {
+                            Layout.fillWidth: true
+                            text: modelData.label
+                            elide: Text.ElideRight
+                        }
+                        Label {
+                            // Comma-operator idiom: reads `dataVersion` purely
+                            // to re-run this binding on every reload, so the
+                            // count never needs its own cache to keep in sync.
+                            text: (tasks.dataVersion, root.viewTaskCount(modelData.key))
+                            opacity: 0.6
+                        }
                     }
                 }
             }
@@ -1128,6 +1154,11 @@ ApplicationWindow {
                             text: pdel.name
                             elide: Text.ElideRight
                         }
+                        Label {
+                            visible: !pdel.editing
+                            text: (tasks.dataVersion, tasks.projectTaskCount(pdel.id))
+                            opacity: 0.6
+                        }
                         TextField {
                             id: pedit
                             visible: pdel.editing
@@ -1171,6 +1202,10 @@ ApplicationWindow {
                                 if (tasks.projectFilter === pdel.id)
                                     tasks.projectFilter = ""
                                 projects.remove(pdel.index)
+                                // Deleting a project unfiles its tasks
+                                // (ON DELETE SET NULL, not cascade) - refresh
+                                // so "Tasks w/o project" picks up the change.
+                                tasks.refresh()
                             }
                         }
                     }
@@ -1318,9 +1353,13 @@ ApplicationWindow {
 
             // Read-only, derived views: no add field, no scope total. New
             // tasks would have no project / no deadline and vanish on reload.
+            // These three also prefix each row's title with its project
+            // (task #2 in the todo batch) since, unlike the other views, a
+            // row here can sit next to one from a different project.
             readonly property bool derivedView:
                 tasks.projectFilter === "finished"
                 || tasks.projectFilter === "deadlined"
+                || tasks.projectFilter === "duetoday"
 
             // Time recorded across everything in the current view (a project,
             // "All tasks", or the project-less ones).
@@ -1421,6 +1460,7 @@ ApplicationWindow {
                     required property string notes
                     required property bool selected
                     required property string branchMask
+                    required property string projectName
 
                     readonly property bool sessionTask: rowItem.id === timer.runningTaskId
                     readonly property bool running: rowItem.sessionTask && !timer.paused
@@ -1512,7 +1552,10 @@ ApplicationWindow {
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: Math.min(parent.width, implicitWidth)
                                 visible: !rowItem.editing
-                                text: rowItem.title
+                                text: (taskPane.derivedView
+                                       ? (rowItem.projectName !== ""
+                                          ? rowItem.projectName + ": " : qsTr("W/o project: "))
+                                       : "") + rowItem.title
                                 font.strikeout: rowItem.done
                                 elide: Text.ElideRight
 

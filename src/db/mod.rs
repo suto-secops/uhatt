@@ -95,6 +95,13 @@ const TASK_COLUMNS: &str = "id, parent_task_id, project_id, title, notes, \
                             deadline, tracked, status, sort_order, created_at, \
                             initial_time_seconds";
 
+/// Trailing column appended (after the tree-annotation columns) to every
+/// [`TaskNode`]-producing query: the owning project's name, or `NULL` when
+/// the task is unfiled. A scalar subquery rather than a `JOIN` so it never
+/// collides with `TASK_COLUMNS`' unqualified `id` / other shared column names.
+const PROJECT_NAME_SUBQUERY: &str =
+    "(SELECT name FROM projects WHERE projects.id = tasks.project_id)";
+
 fn row_to_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
     Ok(Task {
         id: r.get(0)?,
@@ -172,6 +179,8 @@ pub struct TaskNode {
     /// line should be drawn there: `branch_more[i]` is true when the ancestor
     /// owning column `i` still has siblings below this row.
     pub branch_more: Vec<bool>,
+    /// The owning project's name, or `None` when the task is unfiled.
+    pub project_name: Option<String>,
 }
 
 /// Fill in `is_last_child` / `branch_more` for a pre-ordered, depth-tagged list.
@@ -209,6 +218,7 @@ fn map_task_node(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskNode> {
         overdue: r.get::<_, i64>(13)? != 0,
         is_last_child: true,
         branch_more: Vec::new(),
+        project_name: r.get(14)?,
     })
 }
 
@@ -259,7 +269,8 @@ pub fn list_task_tree(
                        WHERE c.parent_task_id = tasks.id {c_done}),
                 (tasks.deadline IS NOT NULL
                     AND tasks.deadline < {TODAY}
-                    AND tasks.status <> 'done')
+                    AND tasks.status <> 'done'),
+                {PROJECT_NAME_SUBQUERY}
          FROM tasks JOIN subtree ON tasks.id = subtree.task_id
          ORDER BY subtree.sort_path"
     );
@@ -279,7 +290,7 @@ pub fn list_task_tree(
 /// hierarchy matters less than when it was done.
 pub fn list_finished_tasks(conn: &Connection) -> rusqlite::Result<Vec<TaskNode>> {
     let sql = format!(
-        "SELECT {TASK_COLUMNS}, 0, 0, 0
+        "SELECT {TASK_COLUMNS}, 0, 0, 0, {PROJECT_NAME_SUBQUERY}
          FROM tasks
          WHERE status = 'done'
          ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC"
@@ -328,7 +339,55 @@ pub fn list_deadlined_tree(conn: &Connection) -> rusqlite::Result<Vec<TaskNode>>
                          AND c.id IN (SELECT id FROM keep)),
                 (tasks.deadline IS NOT NULL
                     AND tasks.deadline < {TODAY}
-                    AND tasks.status <> 'done')
+                    AND tasks.status <> 'done'),
+                {PROJECT_NAME_SUBQUERY}
+         FROM tasks JOIN subtree ON tasks.id = subtree.task_id
+         ORDER BY subtree.sort_path"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], map_task_node)?;
+    let mut nodes: Vec<TaskNode> = rows.collect::<rusqlite::Result<_>>()?;
+    annotate_branches(&mut nodes);
+    Ok(nodes)
+}
+
+/// The task tree pruned to tasks due the current local day: a task is kept
+/// when its own deadline is today, or any descendant's is (same
+/// ancestor-chain-preserving rule as [`list_deadlined_tree`], including the
+/// done-task branch truncation).
+pub fn list_due_today_tree(conn: &Connection) -> rusqlite::Result<Vec<TaskNode>> {
+    let sql = format!(
+        "WITH RECURSIVE
+             keep(id) AS (
+                 SELECT id FROM tasks
+                 WHERE deadline = {TODAY} AND status <> 'done'
+               UNION
+                 SELECT t.parent_task_id
+                 FROM tasks t JOIN keep k ON t.id = k.id
+                 WHERE t.parent_task_id IS NOT NULL AND t.status <> 'done'
+             ),
+             subtree(task_id, depth, sort_path) AS (
+                 SELECT id, 0, printf('%020.6f', sort_order)
+                 FROM tasks
+                 WHERE parent_task_id IS NULL AND status <> 'done'
+                   AND id IN (SELECT id FROM keep)
+               UNION ALL
+                 SELECT t.id, s.depth + 1,
+                        s.sort_path || '/' || printf('%020.6f', t.sort_order)
+                 FROM tasks t JOIN subtree s ON t.parent_task_id = s.task_id
+                 WHERE t.status <> 'done'
+                   AND t.id IN (SELECT id FROM keep)
+             )
+         SELECT {TASK_COLUMNS},
+                subtree.depth,
+                EXISTS(SELECT 1 FROM tasks c
+                       WHERE c.parent_task_id = tasks.id
+                         AND c.status <> 'done'
+                         AND c.id IN (SELECT id FROM keep)),
+                (tasks.deadline IS NOT NULL
+                    AND tasks.deadline < {TODAY}
+                    AND tasks.status <> 'done'),
+                {PROJECT_NAME_SUBQUERY}
          FROM tasks JOIN subtree ON tasks.id = subtree.task_id
          ORDER BY subtree.sort_path"
     );
@@ -1493,6 +1552,31 @@ mod tests {
     }
 
     #[test]
+    fn due_today_tree_keeps_only_todays_deadlines_and_their_ancestors() {
+        let conn = open_in_memory().unwrap();
+        let today = date_at(&conn, "'+0 days'");
+        let tomorrow = date_at(&conn, "'+1 day'");
+
+        let a = root(&conn, "A");
+        let a1 = child(&conn, "A1", &a.id);
+        set_task_deadline(&conn, &a1.id, Some(&today)).unwrap();
+
+        let b = root(&conn, "B"); // due tomorrow, not today -> dropped
+        set_task_deadline(&conn, &b.id, Some(&tomorrow)).unwrap();
+
+        // A deadline buried under a done parent stays hidden, same rule as
+        // `list_deadlined_tree`.
+        let c = root(&conn, "C");
+        let c1 = child(&conn, "C1", &c.id);
+        set_task_deadline(&conn, &c1.id, Some(&today)).unwrap();
+        set_task_status(&conn, &c.id, TaskStatus::Done).unwrap();
+
+        let tree = list_due_today_tree(&conn).unwrap();
+        let titles: Vec<_> = tree.iter().map(|n| n.task.title.as_str()).collect();
+        assert_eq!(titles, ["A", "A1"]);
+    }
+
+    #[test]
     fn deadline_items_lists_dated_open_tasks_in_date_order() {
         let conn = open_in_memory().unwrap();
         let past = date_at(&conn, "'-3 days'");
@@ -1685,19 +1769,27 @@ mod tests {
             Some(work.id.clone())
         );
 
-        let in_work: Vec<_> = list_task_tree(&conn, &ProjectFilter::Only(work.id.clone()), true)
-            .unwrap()
-            .into_iter()
-            .map(|n| n.task.title)
-            .collect();
-        assert_eq!(in_work, ["filed", "sub"]);
+        let in_work = list_task_tree(&conn, &ProjectFilter::Only(work.id.clone()), true).unwrap();
+        assert_eq!(
+            in_work
+                .iter()
+                .map(|n| n.task.title.as_str())
+                .collect::<Vec<_>>(),
+            ["filed", "sub"]
+        );
+        assert!(in_work
+            .iter()
+            .all(|n| n.project_name.as_deref() == Some("Work")));
 
-        let unfiled: Vec<_> = list_task_tree(&conn, &ProjectFilter::Unfiled, true)
-            .unwrap()
-            .into_iter()
-            .map(|n| n.task.title)
-            .collect();
-        assert_eq!(unfiled, ["loose"]);
+        let unfiled = list_task_tree(&conn, &ProjectFilter::Unfiled, true).unwrap();
+        assert_eq!(
+            unfiled
+                .iter()
+                .map(|n| n.task.title.as_str())
+                .collect::<Vec<_>>(),
+            ["loose"]
+        );
+        assert_eq!(unfiled[0].project_name, None);
     }
 
     #[test]

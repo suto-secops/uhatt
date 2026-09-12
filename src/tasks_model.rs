@@ -68,6 +68,8 @@ pub mod qobject {
         /// One char per indent column, "1" where a tree guide line runs
         /// full-height, "0" where it stops at this row's connector.
         BranchMask,
+        /// Owning project's name, or "" when the task is unfiled.
+        ProjectName,
     }
 
     extern "RustQt" {
@@ -87,6 +89,11 @@ pub mod qobject {
         #[qproperty(bool, selection_mode, cxx_name = "selectionMode", READ, WRITE = set_selection_mode, NOTIFY)]
         // How many rows are ticked. Driven by the model.
         #[qproperty(i32, selected_count, cxx_name = "selectedCount")]
+        // Bumps on every reload; QML reads it (via the comma-operator idiom,
+        // e.g. `(tasks.dataVersion, tasks.countAll())`) to force a live
+        // re-evaluation of the count invokables below without any per-view
+        // cache to keep in sync. Same idiom as `Calendar.revision`.
+        #[qproperty(i32, data_version, cxx_name = "dataVersion")]
         type TaskListModel = super::TaskListModelRust;
     }
 
@@ -203,6 +210,36 @@ pub mod qobject {
         /// - every mutation here already reloads itself.
         #[qinvokable]
         fn refresh(self: Pin<&mut TaskListModel>);
+
+        /// Count of tasks in "All tasks" (subject to `showDone`).
+        #[qinvokable]
+        #[cxx_name = "countAll"]
+        fn count_all(self: &TaskListModel) -> i32;
+
+        /// Count of tasks with no project (subject to `showDone`).
+        #[qinvokable]
+        #[cxx_name = "countUnfiled"]
+        fn count_unfiled(self: &TaskListModel) -> i32;
+
+        /// Count of tasks in one project (subject to `showDone`).
+        #[qinvokable]
+        #[cxx_name = "projectTaskCount"]
+        fn project_task_count(self: &TaskListModel, project_id: &QString) -> i32;
+
+        /// Count of tasks shown on the "Due today" view.
+        #[qinvokable]
+        #[cxx_name = "countDueToday"]
+        fn count_due_today(self: &TaskListModel) -> i32;
+
+        /// Count of tasks shown on the "Deadlined" view.
+        #[qinvokable]
+        #[cxx_name = "countDeadlined"]
+        fn count_deadlined(self: &TaskListModel) -> i32;
+
+        /// Count of tasks shown on the "Finished" view.
+        #[qinvokable]
+        #[cxx_name = "countFinished"]
+        fn count_finished(self: &TaskListModel) -> i32;
     }
 
     // QAbstractListModel overrides.
@@ -258,6 +295,8 @@ pub struct TaskListModelRust {
     collapsed: HashSet<String>,
     /// Indices into `tree` that are currently visible, in display order.
     visible: Vec<usize>,
+    /// Backs the `dataVersion` Q_PROPERTY.
+    data_version: i32,
 }
 
 /// The special `projectFilter` value that selects the completed-tasks list.
@@ -266,6 +305,9 @@ const FINISHED: &str = "finished";
 /// tree (a task and its ancestor chain, kept when it or a descendant has a
 /// deadline).
 const DEADLINED: &str = "deadlined";
+/// The special `projectFilter` value for tasks due the current local day
+/// (same ancestor-chain-preserving rule as [`DEADLINED`]).
+const DUE_TODAY: &str = "duetoday";
 
 /// Seconds as `"0m"` / `"45m"` / `"6h 20m"`, for the view total line.
 fn human_hm(secs: i64) -> String {
@@ -365,18 +407,23 @@ impl qobject::TaskListModel {
             db::list_finished_tasks(self.db_conn())
         } else if filter_str == DEADLINED {
             db::list_deadlined_tree(self.db_conn())
+        } else if filter_str == DUE_TODAY {
+            db::list_due_today_tree(self.db_conn())
         } else {
             db::list_task_tree(self.db_conn(), &parse_filter(&filter_str), self.show_done)
         }
         .unwrap_or_default();
         // Time total for the current scope; blank on the ad-hoc views
-        // (finished / deadlined) where a scope total isn't meaningful.
-        let view_total = if filter_str == FINISHED || filter_str == DEADLINED {
-            String::new()
-        } else {
-            let secs = db::scope_seconds(self.db_conn(), &parse_filter(&filter_str)).unwrap_or(0);
-            human_hm(secs)
-        };
+        // (finished / deadlined / due-today) where a scope total isn't
+        // meaningful.
+        let view_total =
+            if filter_str == FINISHED || filter_str == DEADLINED || filter_str == DUE_TODAY {
+                String::new()
+            } else {
+                let secs =
+                    db::scope_seconds(self.db_conn(), &parse_filter(&filter_str)).unwrap_or(0);
+                human_hm(secs)
+            };
 
         let live: HashSet<&str> = tree.iter().map(|n| n.task.id.as_str()).collect();
         let collapsed: HashSet<String> = self
@@ -408,6 +455,8 @@ impl qobject::TaskListModel {
         self.as_mut()
             .set_view_total_text(QString::from(view_total.as_str()));
         self.as_mut().set_selected_count(selected_count);
+        let next = self.data_version.wrapping_add(1);
+        self.as_mut().set_data_version(next);
     }
 
     fn set_project_filter(mut self: Pin<&mut Self>, value: QString) {
@@ -539,7 +588,11 @@ impl qobject::TaskListModel {
         let title = title.to_string();
         let title = title.trim();
         let filter_str = self.project_filter.to_string();
-        if title.is_empty() || filter_str == FINISHED || filter_str == DEADLINED {
+        if title.is_empty()
+            || filter_str == FINISHED
+            || filter_str == DEADLINED
+            || filter_str == DUE_TODAY
+        {
             return;
         }
         // New root tasks land in the currently filtered project, if any.
@@ -831,6 +884,50 @@ impl qobject::TaskListModel {
         self.reload();
     }
 
+    // ---- Sidebar counts ---------------------------------------------------
+    //
+    // Each re-runs the same query the corresponding view reloads with, rather
+    // than a separate `COUNT(*)`, so a count can never drift from what the
+    // view it labels actually shows. Cheap enough at this app's scale; QML
+    // re-evaluates these on every `dataVersion` bump instead of caching them.
+
+    fn count_all(&self) -> i32 {
+        db::list_task_tree(self.db_conn(), &ProjectFilter::All, self.show_done)
+            .map(|v| v.len() as i32)
+            .unwrap_or(0)
+    }
+
+    fn count_unfiled(&self) -> i32 {
+        db::list_task_tree(self.db_conn(), &ProjectFilter::Unfiled, self.show_done)
+            .map(|v| v.len() as i32)
+            .unwrap_or(0)
+    }
+
+    fn project_task_count(&self, project_id: &QString) -> i32 {
+        let filter = ProjectFilter::Only(project_id.to_string());
+        db::list_task_tree(self.db_conn(), &filter, self.show_done)
+            .map(|v| v.len() as i32)
+            .unwrap_or(0)
+    }
+
+    fn count_due_today(&self) -> i32 {
+        db::list_due_today_tree(self.db_conn())
+            .map(|v| v.len() as i32)
+            .unwrap_or(0)
+    }
+
+    fn count_deadlined(&self) -> i32 {
+        db::list_deadlined_tree(self.db_conn())
+            .map(|v| v.len() as i32)
+            .unwrap_or(0)
+    }
+
+    fn count_finished(&self) -> i32 {
+        db::list_finished_tasks(self.db_conn())
+            .map(|v| v.len() as i32)
+            .unwrap_or(0)
+    }
+
     fn data(&self, index: &QModelIndex, role: i32) -> QVariant {
         let Some(node) = self.node_at(index.row()) else {
             return QVariant::default();
@@ -859,6 +956,9 @@ impl qobject::TaskListModel {
                     .map(|&more| if more { '1' } else { '0' })
                     .collect();
                 QVariant::from(&QString::from(mask.as_str()))
+            }
+            qobject::TaskRole::ProjectName => {
+                QVariant::from(&QString::from(node.project_name.as_deref().unwrap_or("")))
             }
             _ => QVariant::default(),
         }
@@ -891,6 +991,10 @@ impl qobject::TaskListModel {
         roles.insert(
             qobject::TaskRole::BranchMask.repr,
             QByteArray::from("branchMask"),
+        );
+        roles.insert(
+            qobject::TaskRole::ProjectName.repr,
+            QByteArray::from("projectName"),
         );
         roles
     }
