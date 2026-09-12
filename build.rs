@@ -13,5 +13,11 @@ fn main() {
             "src/actions_log.rs",
             "src/quick_create.rs",
         ])
+        // App/window icon, rasterized from assets/uhatt-logo.svg (kept
+        // alongside it as the source). Set from C++ (window_icon.cpp) since
+        // QML's Window has no "icon" property in this build, and
+        // cxx-qt-lib has no QGuiApplication::setWindowIcon/QIcon binding.
+        .qrc_resources(["assets/uhatt-logo.png"])
+        .cpp_file("src/window_icon.cpp")
         .build();
 }
