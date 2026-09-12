@@ -741,7 +741,7 @@ pub fn reparent_task(conn: &Connection, task_id: &str, new_parent: &str) -> rusq
 
 // --- Projects -------------------------------------------------------------
 
-const PROJECT_COLUMNS: &str = "id, name, tracked, archived, created_at";
+const PROJECT_COLUMNS: &str = "id, name, tracked, archived, created_at, parent_project_id";
 
 fn row_to_project(r: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
     Ok(Project {
@@ -750,6 +750,7 @@ fn row_to_project(r: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
         tracked: r.get::<_, i64>(2)? != 0,
         archived: r.get::<_, i64>(3)? != 0,
         created_at: r.get(4)?,
+        parent_id: r.get(5)?,
     })
 }
 
@@ -776,15 +777,102 @@ pub fn get_project(conn: &Connection, id: &str) -> rusqlite::Result<Option<Proje
     .optional()
 }
 
-/// All non-archived projects, ordered by name.
-pub fn list_projects(conn: &Connection) -> rusqlite::Result<Vec<Project>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {PROJECT_COLUMNS} FROM projects
-         WHERE archived = 0
-         ORDER BY name COLLATE NOCASE, created_at"
-    ))?;
-    let rows = stmt.query_map([], row_to_project)?;
+/// A project plus its nesting depth, in tree (pre-order) display order.
+/// Siblings are ordered by name - there is no manual drag-to-reorder for
+/// projects, only drag-to-nest.
+#[derive(Debug, Clone)]
+pub struct ProjectNode {
+    pub project: Project,
+    pub depth: u32,
+    pub has_children: bool,
+}
+
+/// Every non-archived project, pre-ordered for the flattened sidebar tree.
+pub fn list_project_tree(conn: &Connection) -> rusqlite::Result<Vec<ProjectNode>> {
+    let sql = "WITH RECURSIVE
+             subtree(id, depth, sort_path) AS (
+                 SELECT id, 0, name COLLATE NOCASE
+                 FROM projects WHERE parent_project_id IS NULL AND archived = 0
+               UNION ALL
+                 SELECT p.id, s.depth + 1, s.sort_path || '/' || (p.name COLLATE NOCASE)
+                 FROM projects p JOIN subtree s ON p.parent_project_id = s.id
+                 WHERE p.archived = 0
+             )
+         SELECT projects.id, projects.name, projects.tracked, projects.archived,
+                projects.created_at, projects.parent_project_id,
+                subtree.depth,
+                EXISTS(SELECT 1 FROM projects c
+                       WHERE c.parent_project_id = projects.id AND c.archived = 0)
+         FROM projects JOIN subtree ON projects.id = subtree.id
+         ORDER BY subtree.sort_path";
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map([], |r| {
+        Ok(ProjectNode {
+            project: row_to_project(r)?,
+            depth: r.get::<_, i64>(6)? as u32,
+            has_children: r.get::<_, i64>(7)? != 0,
+        })
+    })?;
     rows.collect()
+}
+
+/// Whether `id` may be re-parented under `new_parent` (or moved to the top
+/// level when `new_parent` is `None`) - mirrors [`can_reparent`] for tasks:
+/// both must exist, they must differ, and `new_parent` must not sit inside
+/// `id`'s own subtree (which would make a cycle).
+pub fn can_reparent_project(
+    conn: &Connection,
+    id: &str,
+    new_parent: Option<&str>,
+) -> rusqlite::Result<bool> {
+    let Some(new_parent) = new_parent else {
+        // Moving to the top level always succeeds - it's not a cycle, and
+        // "no-op if already there" is fine to allow (it's just a no-op write).
+        return conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
+            params![id],
+            |r| r.get::<_, i64>(0).map(|n| n != 0),
+        );
+    };
+    if id == new_parent {
+        return Ok(false);
+    }
+    let in_subtree: bool = conn.query_row(
+        "WITH RECURSIVE subtree(id) AS (
+             SELECT ?1
+           UNION ALL
+             SELECT p.id FROM projects p JOIN subtree s ON p.parent_project_id = s.id
+         )
+         SELECT EXISTS(SELECT 1 FROM subtree WHERE id = ?2)",
+        params![id, new_parent],
+        |r| r.get::<_, i64>(0).map(|n| n != 0),
+    )?;
+    if in_subtree {
+        return Ok(false);
+    }
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)
+             AND EXISTS(SELECT 1 FROM projects WHERE id = ?2)",
+        params![id, new_parent],
+        |r| r.get::<_, i64>(0).map(|n| n != 0),
+    )
+}
+
+/// Re-parent `id` under `new_parent`, or to the top level when `new_parent` is
+/// `None`. No-op when [`can_reparent_project`] would reject the move.
+pub fn reparent_project(
+    conn: &Connection,
+    id: &str,
+    new_parent: Option<&str>,
+) -> rusqlite::Result<()> {
+    if !can_reparent_project(conn, id, new_parent)? {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE projects SET parent_project_id = ?2 WHERE id = ?1",
+        params![id, new_parent],
+    )?;
+    Ok(())
 }
 
 /// Rename a project. `name` is trimmed.
@@ -797,7 +885,8 @@ pub fn rename_project(conn: &Connection, id: &str, name: &str) -> rusqlite::Resu
 }
 
 /// Delete a project. Its tasks are kept and become unfiled
-/// (`tasks.project_id` is `ON DELETE SET NULL`).
+/// (`tasks.project_id` is `ON DELETE SET NULL`); any sub-projects are
+/// promoted to the top level (`parent_project_id` is `ON DELETE SET NULL`).
 pub fn delete_project(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
     Ok(())
@@ -1800,8 +1889,58 @@ mod tests {
 
         delete_project(&conn, &p.id).unwrap();
 
-        assert!(list_projects(&conn).unwrap().is_empty());
+        assert!(list_project_tree(&conn).unwrap().is_empty());
         assert_eq!(get_task(&conn, &t.id).unwrap().unwrap().project_id, None);
+    }
+
+    #[test]
+    fn project_tree_is_preordered_with_depth_and_child_flags() {
+        let conn = open_in_memory().unwrap();
+        let a = create_project(&conn, "A").unwrap();
+        let a1 = create_project(&conn, "A1").unwrap();
+        reparent_project(&conn, &a1.id, Some(&a.id)).unwrap();
+        create_project(&conn, "B").unwrap();
+
+        let tree = list_project_tree(&conn).unwrap();
+        let shape: Vec<_> = tree
+            .iter()
+            .map(|n| (n.project.name.as_str(), n.depth, n.has_children))
+            .collect();
+        assert_eq!(shape, [("A", 0, true), ("A1", 1, false), ("B", 0, false)]);
+    }
+
+    #[test]
+    fn reparent_project_guards_cycles_and_promotes_children_on_delete() {
+        let conn = open_in_memory().unwrap();
+        let a = create_project(&conn, "A").unwrap();
+        let b = create_project(&conn, "B").unwrap();
+        let b1 = create_project(&conn, "B1").unwrap();
+        reparent_project(&conn, &b1.id, Some(&b.id)).unwrap();
+
+        // Cycle / self guards, same rules as tasks.
+        assert!(!can_reparent_project(&conn, &b.id, Some(&b.id)).unwrap());
+        assert!(!can_reparent_project(&conn, &b.id, Some(&b1.id)).unwrap()); // onto own child
+        assert!(!can_reparent_project(&conn, &b.id, Some("ghost")).unwrap());
+        assert!(can_reparent_project(&conn, &b.id, Some(&a.id)).unwrap());
+
+        reparent_project(&conn, &b.id, Some(&a.id)).unwrap();
+        assert_eq!(
+            get_project(&conn, &b.id).unwrap().unwrap().parent_id,
+            Some(a.id.clone())
+        );
+
+        // Deleting A promotes B (and transitively B1 stays under B) to the
+        // top level rather than deleting it.
+        delete_project(&conn, &a.id).unwrap();
+        assert_eq!(get_project(&conn, &b.id).unwrap().unwrap().parent_id, None);
+        assert_eq!(
+            get_project(&conn, &b1.id).unwrap().unwrap().parent_id,
+            Some(b.id)
+        );
+
+        // Moving back to the top level.
+        reparent_project(&conn, &b1.id, None).unwrap();
+        assert_eq!(get_project(&conn, &b1.id).unwrap().unwrap().parent_id, None);
     }
 
     #[test]
@@ -2274,10 +2413,10 @@ mod tests {
         let conn = open_in_memory().unwrap();
         create_project(&conn, "  banana ").unwrap();
         create_project(&conn, "Apple").unwrap();
-        let names: Vec<_> = list_projects(&conn)
+        let names: Vec<_> = list_project_tree(&conn)
             .unwrap()
             .into_iter()
-            .map(|p| p.name)
+            .map(|n| n.project.name)
             .collect();
         assert_eq!(names, ["Apple", "banana"]);
     }

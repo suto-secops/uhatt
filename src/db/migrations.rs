@@ -6,7 +6,7 @@
 
 use rusqlite::Connection;
 
-pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
+pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
 
 /// Number of migration steps the code expects the database to be at.
 pub const COUNT: usize = MIGRATIONS.len();
@@ -112,4 +112,13 @@ CREATE TABLE actions (
 // time_entries row - so a plain nullable column is all it needs.
 const V4: &str = r#"
 ALTER TABLE tasks ADD COLUMN initial_time_seconds INTEGER;
+"#;
+
+// Projects can now nest (sidebar declutter: fold related projects under one
+// parent), the same self-reference scheme as `tasks.parent_task_id`.
+// `ON DELETE SET NULL` matches the existing "delete a project, its tasks
+// survive unfiled" behavior: deleting a parent promotes its children to the
+// top level rather than deleting them.
+const V5: &str = r#"
+ALTER TABLE projects ADD COLUMN parent_project_id TEXT REFERENCES projects(id) ON DELETE SET NULL;
 "#;

@@ -154,14 +154,18 @@ ApplicationWindow {
         if (mainView === "actions") actionsLog.reload()
     }
 
-    // Floating chip shown under the cursor while a task is being dragged onto
-    // another to re-parent it. Lives at the window level so it isn't clipped by
-    // the task list.
+    // Floating chip shown under the cursor while a task or project is being
+    // dragged onto another to re-parent it. Lives at the window level so it
+    // isn't clipped by the task list or the sidebar. Shared by both trees;
+    // `sourceKind` ("task" / "project") tells a drop target which model the
+    // drag actually belongs to, so a project dropped onto a task row (or vice
+    // versa) is correctly ignored rather than misreading `sourceRow`.
     Control {
         id: dragProxy
         parent: Overlay.overlay
         z: 9999
         visible: Drag.active
+        property string sourceKind: "task"
         property int sourceRow: -1
         property string label: ""
 
@@ -1137,7 +1141,11 @@ ApplicationWindow {
                     required property int index
                     required property string id
                     required property string name
+                    required property int depth
+                    required property bool hasChildren
+                    required property bool expanded
                     property bool editing: false
+                    property bool dropHover: false
 
                     width: projectList.width
                     highlighted: root.mainView === "tasks"
@@ -1148,6 +1156,60 @@ ApplicationWindow {
                     }
 
                     contentItem: RowLayout {
+                        spacing: 4
+
+                        Item {
+                            Layout.preferredWidth: pdel.depth * 16
+                            Layout.minimumWidth: pdel.depth * 16
+                        }
+
+                        // Collapse/expand box - same "-"/"+" drawing as the
+                        // task tree's, without the full-height guide lines
+                        // (a 160-420px sidebar has no room for pipe/elbow
+                        // guides on top of a project tree already this deep).
+                        Item {
+                            Layout.preferredWidth: 16
+                            Layout.minimumWidth: 16
+                            Layout.alignment: Qt.AlignVCenter
+                            visible: pdel.hasChildren
+                            implicitHeight: 13
+
+                            Rectangle {
+                                x: 1.5
+                                y: 0
+                                width: 13
+                                height: 13
+                                radius: 2
+                                color: "transparent"
+                                border.width: 1
+                                border.color: pdisc.containsMouse
+                                              ? palette.highlight : palette.text
+                                opacity: pdisc.containsMouse ? 1.0 : 0.35
+
+                                Rectangle {
+                                    x: 3
+                                    y: 6
+                                    width: 7
+                                    height: 1
+                                    color: parent.border.color
+                                }
+                                Rectangle {
+                                    visible: !pdel.expanded
+                                    x: 6
+                                    y: 3
+                                    width: 1
+                                    height: 7
+                                    color: parent.border.color
+                                }
+                            }
+                            MouseArea {
+                                id: pdisc
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                onClicked: projects.toggleExpanded(pdel.index)
+                            }
+                        }
+
                         Label {
                             visible: !pdel.editing
                             Layout.fillWidth: true
@@ -1197,6 +1259,10 @@ ApplicationWindow {
                             }
                         }
                         MenuItem {
+                            text: qsTr("Move to top level")
+                            onTriggered: projects.reparent(pdel.index, "")
+                        }
+                        MenuItem {
                             text: qsTr("Delete")
                             onTriggered: {
                                 if (tasks.projectFilter === pdel.id)
@@ -1208,6 +1274,53 @@ ApplicationWindow {
                                 tasks.refresh()
                             }
                         }
+                    }
+
+                    // ---- Drag to nest under another project ----
+                    // Press and drag the row onto another project to make it
+                    // a child of that project. Shares `dragProxy` with the
+                    // task tree's drag-to-reparent; `sourceKind` tells the
+                    // drop targets which model a drop belongs to.
+                    DragHandler {
+                        target: dragProxy
+                        enabled: !pdel.editing
+                        onActiveChanged: {
+                            if (active) {
+                                dragProxy.sourceKind = "project"
+                                dragProxy.sourceRow = pdel.index
+                                dragProxy.label = pdel.name
+                                dragProxy.x = centroid.scenePosition.x - dragProxy.Drag.hotSpot.x
+                                dragProxy.y = centroid.scenePosition.y - dragProxy.Drag.hotSpot.y
+                                dragProxy.Drag.active = true
+                            } else {
+                                dragProxy.Drag.drop()
+                                dragProxy.Drag.active = false
+                            }
+                        }
+                    }
+
+                    DropArea {
+                        anchors.fill: parent
+                        onEntered: (drag) => {
+                            pdel.dropHover = drag.source.sourceKind === "project"
+                                && projects.canReparent(drag.source.sourceRow, pdel.id)
+                        }
+                        onExited: pdel.dropHover = false
+                        onDropped: (drop) => {
+                            if (drop.source.sourceKind === "project"
+                                && projects.canReparent(drop.source.sourceRow, pdel.id))
+                                projects.reparent(drop.source.sourceRow, pdel.id)
+                            pdel.dropHover = false
+                        }
+                    }
+
+                    Rectangle {
+                        anchors.fill: parent
+                        visible: pdel.dropHover
+                        color: "transparent"
+                        border.color: palette.highlight
+                        border.width: 2
+                        radius: 3
                     }
                 }
             }
@@ -1981,6 +2094,7 @@ ApplicationWindow {
                         enabled: !tasks.selectionMode && !rowItem.editing
                         onActiveChanged: {
                             if (active) {
+                                dragProxy.sourceKind = "task"
                                 dragProxy.sourceRow = rowItem.index
                                 dragProxy.label = rowItem.title
                                 dragProxy.x = centroid.scenePosition.x - dragProxy.Drag.hotSpot.x
@@ -1997,12 +2111,13 @@ ApplicationWindow {
                     DropArea {
                         anchors.fill: parent
                         onEntered: (drag) => {
-                            rowItem.dropHover =
-                                tasks.canReparent(drag.source.sourceRow, rowItem.id)
+                            rowItem.dropHover = drag.source.sourceKind === "task"
+                                && tasks.canReparent(drag.source.sourceRow, rowItem.id)
                         }
                         onExited: rowItem.dropHover = false
                         onDropped: (drop) => {
-                            if (tasks.canReparent(drop.source.sourceRow, rowItem.id))
+                            if (drop.source.sourceKind === "task"
+                                && tasks.canReparent(drop.source.sourceRow, rowItem.id))
                                 tasks.reparent(drop.source.sourceRow, rowItem.id)
                             rowItem.dropHover = false
                         }
