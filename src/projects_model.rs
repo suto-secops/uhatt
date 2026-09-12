@@ -1,16 +1,19 @@
-//! `ProjectListModel` - a flat `QAbstractListModel` of projects for the sidebar.
+//! `ProjectListModel` - a `QAbstractListModel` exposing the project tree to
+//! QML as a flattened, depth-annotated list (sidebar "folders" for grouping
+//! projects; a project's own task filter never includes a sub-project's
+//! tasks - nesting is purely organizational).
 //!
-//! Same cache discipline as [`crate::tasks_model`]: an in-memory `Vec<Project>`,
+//! Same cache discipline as [`crate::tasks_model`]: an in-memory `Vec<ProjectNode>`,
 //! reloaded from SQLite inside `beginResetModel`/`endResetModel` on every change.
 
 use core::pin::Pin;
+use std::collections::HashSet;
 
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant};
 use rusqlite::Connection;
 
-use crate::db;
-use crate::domain::Project;
+use crate::db::{self, ProjectNode};
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -36,6 +39,12 @@ pub mod qobject {
     enum ProjectRole {
         Id,
         Name,
+        /// Nesting level (0 = top level).
+        Depth,
+        /// Whether this project has any sub-projects.
+        HasChildren,
+        /// Whether this project's sub-projects are currently shown.
+        Expanded,
     }
 
     extern "RustQt" {
@@ -56,9 +65,27 @@ pub mod qobject {
         #[qinvokable]
         fn rename(self: Pin<&mut ProjectListModel>, row: i32, name: &QString);
 
-        /// Delete the project at `row`; its tasks become unfiled.
+        /// Delete the project at `row`; its tasks become unfiled and any
+        /// sub-projects are promoted to the top level.
         #[qinvokable]
         fn remove(self: Pin<&mut ProjectListModel>, row: i32);
+
+        /// Re-parent the project at `row` under `target_id`, or to the top
+        /// level when `target_id` is empty. No-op if the move would create a
+        /// cycle.
+        #[qinvokable]
+        fn reparent(self: Pin<&mut ProjectListModel>, row: i32, target_id: &QString);
+
+        /// Whether [`reparent`] with these arguments would do anything - used
+        /// to light up a valid drop target while dragging.
+        #[qinvokable]
+        #[cxx_name = "canReparent"]
+        fn can_reparent(self: &ProjectListModel, row: i32, target_id: &QString) -> bool;
+
+        /// Collapse an expanded project or expand a collapsed one.
+        #[qinvokable]
+        #[cxx_name = "toggleExpanded"]
+        fn toggle_expanded(self: Pin<&mut ProjectListModel>, row: i32);
 
         /// Re-read from SQLite. For picking up a project created through
         /// another QObject (e.g. quick creation).
@@ -101,7 +128,32 @@ pub mod qobject {
 #[derive(Default)]
 pub struct ProjectListModelRust {
     conn: Option<Connection>,
-    cache: Vec<Project>,
+    tree: Vec<ProjectNode>,
+    collapsed: HashSet<String>,
+    /// Indices into `tree` that are currently visible, in display order.
+    visible: Vec<usize>,
+}
+
+/// Walk a pre-ordered tree and return the indices whose ancestors are all
+/// expanded. A collapsed node stays visible; its descendants do not. Same
+/// logic as `tasks_model::compute_visible`, duplicated rather than shared
+/// since the two node types differ.
+fn compute_visible(tree: &[ProjectNode], collapsed: &HashSet<String>) -> Vec<usize> {
+    let mut visible = Vec::with_capacity(tree.len());
+    let mut hidden_below: Option<u32> = None;
+    for (i, node) in tree.iter().enumerate() {
+        if let Some(depth) = hidden_below {
+            if node.depth > depth {
+                continue;
+            }
+            hidden_below = None;
+        }
+        visible.push(i);
+        if node.has_children && collapsed.contains(&node.project.id) {
+            hidden_below = Some(node.depth);
+        }
+    }
+    visible
 }
 
 impl cxx_qt::Initialize for qobject::ProjectListModel {
@@ -113,10 +165,12 @@ impl cxx_qt::Initialize for qobject::ProjectListModel {
                 db::open_in_memory().expect("in-memory database")
             }
         };
-        let cache = db::list_projects(&conn).unwrap_or_default();
+        let tree = db::list_project_tree(&conn).unwrap_or_default();
+        let visible = compute_visible(&tree, &HashSet::new());
         let mut rust = self.as_mut().rust_mut();
         rust.conn = Some(conn);
-        rust.cache = cache;
+        rust.tree = tree;
+        rust.visible = visible;
     }
 }
 
@@ -127,12 +181,35 @@ impl qobject::ProjectListModel {
             .expect("ProjectListModel used before initialize()")
     }
 
+    fn node_at(&self, row: i32) -> Option<&ProjectNode> {
+        let row = usize::try_from(row).ok()?;
+        let idx = *self.visible.get(row)?;
+        self.tree.get(idx)
+    }
+
+    fn id_at(&self, row: i32) -> Option<String> {
+        self.node_at(row).map(|n| n.project.id.clone())
+    }
+
     fn reload(mut self: Pin<&mut Self>) {
-        let projects = db::list_projects(self.db_conn()).unwrap_or_default();
-        // SAFETY: begin/end are paired around the cache swap.
+        let tree = db::list_project_tree(self.db_conn()).unwrap_or_default();
+        let live: HashSet<&str> = tree.iter().map(|n| n.project.id.as_str()).collect();
+        let collapsed: HashSet<String> = self
+            .collapsed
+            .iter()
+            .filter(|id| live.contains(id.as_str()))
+            .cloned()
+            .collect();
+        let visible = compute_visible(&tree, &collapsed);
+        // SAFETY: begin/end are paired around the state swap.
         unsafe {
             self.as_mut().begin_reset_model();
-            self.as_mut().rust_mut().cache = projects;
+            {
+                let mut rust = self.as_mut().rust_mut();
+                rust.tree = tree;
+                rust.collapsed = collapsed;
+                rust.visible = visible;
+            }
             self.as_mut().end_reset_model();
         }
     }
@@ -187,23 +264,65 @@ impl qobject::ProjectListModel {
         self.reload();
     }
 
-    fn id_at(&self, row: i32) -> Option<String> {
-        usize::try_from(row)
-            .ok()
-            .and_then(|i| self.cache.get(i))
-            .map(|p| p.id.clone())
+    fn reparent(self: Pin<&mut Self>, row: i32, target_id: &QString) {
+        let Some(id) = self.id_at(row) else {
+            return;
+        };
+        let target = target_id.to_string();
+        let target = (!target.is_empty()).then_some(target.as_str());
+        if let Err(e) = db::reparent_project(self.db_conn(), &id, target) {
+            eprintln!("uhatt: reparent project failed: {e}");
+            return;
+        }
+        self.reload();
+    }
+
+    fn can_reparent(&self, row: i32, target_id: &QString) -> bool {
+        let Some(id) = self.id_at(row) else {
+            return false;
+        };
+        let target = target_id.to_string();
+        let target = (!target.is_empty()).then_some(target.as_str());
+        db::can_reparent_project(self.db_conn(), &id, target).unwrap_or(false)
+    }
+
+    fn toggle_expanded(mut self: Pin<&mut Self>, row: i32) {
+        let Some(node) = self.node_at(row) else {
+            return;
+        };
+        if !node.has_children {
+            return;
+        }
+        let id = node.project.id.clone();
+        {
+            let mut rust = self.as_mut().rust_mut();
+            if !rust.collapsed.remove(&id) {
+                rust.collapsed.insert(id);
+            }
+        }
+        let visible = compute_visible(&self.tree, &self.collapsed);
+        // SAFETY: begin/end are paired around the visible-set swap.
+        unsafe {
+            self.as_mut().begin_reset_model();
+            self.as_mut().rust_mut().visible = visible;
+            self.as_mut().end_reset_model();
+        }
     }
 
     fn data(&self, index: &QModelIndex, role: i32) -> QVariant {
-        let Some(project) = usize::try_from(index.row())
-            .ok()
-            .and_then(|i| self.cache.get(i))
-        else {
+        let Some(node) = self.node_at(index.row()) else {
             return QVariant::default();
         };
         match (qobject::ProjectRole { repr: role }) {
-            qobject::ProjectRole::Id => QVariant::from(&QString::from(project.id.as_str())),
-            qobject::ProjectRole::Name => QVariant::from(&QString::from(project.name.as_str())),
+            qobject::ProjectRole::Id => QVariant::from(&QString::from(node.project.id.as_str())),
+            qobject::ProjectRole::Name => {
+                QVariant::from(&QString::from(node.project.name.as_str()))
+            }
+            qobject::ProjectRole::Depth => QVariant::from(&(node.depth as i32)),
+            qobject::ProjectRole::HasChildren => QVariant::from(&node.has_children),
+            qobject::ProjectRole::Expanded => {
+                QVariant::from(&(node.has_children && !self.collapsed.contains(&node.project.id)))
+            }
             _ => QVariant::default(),
         }
     }
@@ -212,10 +331,19 @@ impl qobject::ProjectListModel {
         let mut roles = QHash::<QHashPair_i32_QByteArray>::default();
         roles.insert(qobject::ProjectRole::Id.repr, QByteArray::from("id"));
         roles.insert(qobject::ProjectRole::Name.repr, QByteArray::from("name"));
+        roles.insert(qobject::ProjectRole::Depth.repr, QByteArray::from("depth"));
+        roles.insert(
+            qobject::ProjectRole::HasChildren.repr,
+            QByteArray::from("hasChildren"),
+        );
+        roles.insert(
+            qobject::ProjectRole::Expanded.repr,
+            QByteArray::from("expanded"),
+        );
         roles
     }
 
     fn row_count(&self, _parent: &QModelIndex) -> i32 {
-        i32::try_from(self.cache.len()).unwrap_or(i32::MAX)
+        i32::try_from(self.visible.len()).unwrap_or(i32::MAX)
     }
 }

@@ -67,6 +67,8 @@ impl Task {
 
 /// A project groups root tasks. `tracked` is a display flag (show its time
 /// graph); time is always derived by summing the entries under its tasks.
+/// `parent_id` nests it under another project (sidebar grouping only - a
+/// project's own task filter never includes a sub-project's tasks).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Project {
     pub id: Id,
@@ -74,6 +76,7 @@ pub struct Project {
     pub tracked: bool,
     pub archived: bool,
     pub created_at: String,
+    pub parent_id: Option<Id>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
