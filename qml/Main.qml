@@ -1919,6 +1919,137 @@ ApplicationWindow {
                                 }
                             }
 
+                            // ---- Habit: repeats on a schedule ----
+                            Label {
+                                text: qsTr("Repeats:")
+                                font.pointSize: 9
+                                opacity: 0.7
+                            }
+                            Flow {
+                                Layout.fillWidth: true
+                                spacing: 6
+                                Repeater {
+                                    model: [
+                                        { v: 0, label: qsTr("Off") },
+                                        { v: 1, label: qsTr("Days") },
+                                        { v: 2, label: qsTr("Weeks") },
+                                        { v: 3, label: qsTr("Months") },
+                                        { v: 4, label: qsTr("Weekdays") },
+                                        { v: 5, label: qsTr("1st of month") },
+                                        { v: 6, label: qsTr("Last of month") },
+                                    ]
+                                    delegate: Button {
+                                        required property var modelData
+                                        text: modelData.label
+                                        font.pointSize: 8
+                                        padding: 3
+                                        focusPolicy: Qt.NoFocus
+                                        checkable: true
+                                        checked: (tasks.dataVersion,
+                                                  tasks.periodicityKind(rowItem.index)) === modelData.v
+                                        onClicked: {
+                                            if (modelData.v === 0) {
+                                                tasks.setPeriodicity(rowItem.index, 0, 1, "")
+                                            } else if (modelData.v === 4) {
+                                                // Weekdays needs at least one
+                                                // day ticked - keep whatever
+                                                // was already selected, or
+                                                // default to today's.
+                                                let current = tasks.periodicityWeekdays(rowItem.index)
+                                                let jsDow = new Date().getDay()
+                                                let isoDow = jsDow === 0 ? 7 : jsDow
+                                                tasks.setPeriodicity(rowItem.index, 4, 1,
+                                                    current !== "" ? current : String(isoDow))
+                                            } else {
+                                                let n = tasks.periodicityN(rowItem.index)
+                                                tasks.setPeriodicity(rowItem.index, modelData.v,
+                                                                      n > 0 ? n : 1, "")
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Layout.leftMargin: 8
+                                readonly property int kind: (tasks.dataVersion,
+                                                              tasks.periodicityKind(rowItem.index))
+                                visible: kind >= 1 && kind <= 3
+                                Label {
+                                    text: qsTr("Every")
+                                    font.pointSize: 9
+                                    opacity: 0.7
+                                }
+                                SpinBox {
+                                    id: periodicityN
+                                    from: 1
+                                    to: 999
+                                    value: (tasks.dataVersion, tasks.periodicityN(rowItem.index)) || 1
+                                    onValueModified: tasks.setPeriodicity(
+                                        rowItem.index, parent.kind, value, "")
+                                }
+                                Label {
+                                    font.pointSize: 9
+                                    opacity: 0.7
+                                    text: parent.kind === 1 ? qsTr("day(s)")
+                                        : parent.kind === 2 ? qsTr("week(s)") : qsTr("month(s)")
+                                }
+                                Item { Layout.fillWidth: true }
+                            }
+                            Flow {
+                                Layout.fillWidth: true
+                                Layout.leftMargin: 8
+                                visible: (tasks.dataVersion,
+                                          tasks.periodicityKind(rowItem.index)) === 4
+                                spacing: 4
+                                Repeater {
+                                    model: [
+                                        { v: 1, label: qsTr("Mon") }, { v: 2, label: qsTr("Tue") },
+                                        { v: 3, label: qsTr("Wed") }, { v: 4, label: qsTr("Thu") },
+                                        { v: 5, label: qsTr("Fri") }, { v: 6, label: qsTr("Sat") },
+                                        { v: 7, label: qsTr("Sun") },
+                                    ]
+                                    delegate: Button {
+                                        required property var modelData
+                                        text: modelData.label
+                                        font.pointSize: 8
+                                        padding: 3
+                                        focusPolicy: Qt.NoFocus
+                                        checkable: true
+                                        checked: {
+                                            let csv = (tasks.dataVersion,
+                                                       tasks.periodicityWeekdays(rowItem.index))
+                                            return csv.split(",").indexOf(String(modelData.v)) !== -1
+                                        }
+                                        onClicked: {
+                                            let csv = tasks.periodicityWeekdays(rowItem.index)
+                                            let days = csv === "" ? [] : csv.split(",")
+                                            let s = String(modelData.v)
+                                            let idx = days.indexOf(s)
+                                            if (idx === -1)
+                                                days.push(s)
+                                            else if (days.length > 1)
+                                                days.splice(idx, 1) // keep at least one
+                                            tasks.setPeriodicity(rowItem.index, 4, 1, days.join(","))
+                                        }
+                                    }
+                                }
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                Layout.leftMargin: 8
+                                font.pointSize: 8
+                                opacity: 0.6
+                                wrapMode: Text.WordWrap
+                                property string effText: (tasks.dataVersion,
+                                    tasks.effectivePeriodicityText(rowItem.index))
+                                property int missed: (tasks.dataVersion,
+                                    tasks.missedCount(rowItem.index))
+                                visible: effText !== ""
+                                text: effText + (missed > 0
+                                                  ? qsTr("  ·  %1 missed").arg(missed) : "")
+                            }
+
                             Label {
                                 text: qsTr("Description")
                                 font.pointSize: 9

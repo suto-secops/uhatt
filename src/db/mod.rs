@@ -26,6 +26,13 @@ const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime')";
 /// SQLite expression for today's local date, `YYYY-MM-DD`.
 const TODAY: &str = "date('now', 'localtime')";
 
+/// Today's local date as a plain string - for a caller (like a missed-habit-
+/// occurrence count) that needs it as a bound parameter rather than able to
+/// inline `{TODAY}` into its own SQL.
+pub fn today_string(conn: &Connection) -> rusqlite::Result<String> {
+    conn.query_row(&format!("SELECT {TODAY}"), [], |r| r.get(0))
+}
+
 /// Failure opening a database: either creating its directory or SQLite itself.
 #[derive(Debug)]
 pub enum OpenError {
@@ -511,15 +518,7 @@ pub fn set_task_deadline(
 }
 
 // --- Habits (recurring tasks) ---------------------------------------------
-//
-// Backend only - not yet wired to a caller. Regeneration-on-completion (a
-// habit's whole subtree marks done and a fresh copy takes its place) and the
-// periodicity dropdown land in a follow-up PR; everything below is exercised
-// directly by this module's tests in the meantime, hence the blanket
-// `#[allow(dead_code)]`s (a function reachable only from `#[cfg(test)]` still
-// reads as dead code to the plain, non-test build).
 
-#[allow(dead_code)]
 /// Set (or clear) the periodicity set directly on this task. Does not touch
 /// any other row - a task's *effective* periodicity ([`effective_periodicity`])
 /// also considers its nearest ancestor, so reparenting a plain task under a
@@ -537,7 +536,6 @@ pub fn set_task_periodicity(
     Ok(())
 }
 
-#[allow(dead_code)]
 /// The periodicity that governs `id`: its own if it has one, else the
 /// nearest ancestor's, else `None`. A malformed stored value (shouldn't
 /// happen - nothing free-types this) is treated as absent rather than an
@@ -560,7 +558,6 @@ pub fn effective_periodicity(conn: &Connection, id: &str) -> rusqlite::Result<Op
     Ok(stored.and_then(|s| Periodicity::from_stored(&s)))
 }
 
-#[allow(dead_code)]
 /// One schedule step strictly after `from`: the next date matching `spec`.
 /// Pure date arithmetic via SQLite's date functions, same idiom as
 /// [`whole_months`].
@@ -648,7 +645,6 @@ fn step_occurrence(conn: &Connection, spec: &Periodicity, from: &str) -> rusqlit
     }
 }
 
-#[allow(dead_code)]
 /// Advance from `deadline` one schedule step at a time, past every occurrence
 /// that has already come and gone (`<= today`), stopping at the first one
 /// still ahead. Returns that occurrence plus how many were skipped to reach
@@ -669,7 +665,6 @@ fn advance_schedule(
     Ok((next, missed))
 }
 
-#[allow(dead_code)]
 /// The next occurrence of `spec` after `deadline` that isn't already in the
 /// past relative to `today` - see [`advance_schedule`].
 pub fn next_occurrence(
@@ -681,7 +676,6 @@ pub fn next_occurrence(
     Ok(advance_schedule(conn, spec, deadline, today)?.0)
 }
 
-#[allow(dead_code)]
 /// How many scheduled occurrences of `spec` fell in `(deadline, today]` -
 /// i.e. how many times this habit has been missed while stuck on `deadline`.
 pub fn missed_occurrences(

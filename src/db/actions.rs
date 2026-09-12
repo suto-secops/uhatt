@@ -356,6 +356,166 @@ pub fn capture_and_log_delete(conn: &Connection, task_id: &str) -> rusqlite::Res
     insert_action(conn, "delete_task", &summary, &payload)
 }
 
+// --- Habits (recurring tasks) -----------------------------------------------
+
+/// Every task in a subtree's prior status, captured before [`complete_recurring_task`]
+/// marks the not-yet-done ones done - so undo restores exactly what changed
+/// and nothing that didn't (a subtask already done before its recurring
+/// parent's completion must stay done, not just get flipped back).
+#[derive(Serialize, Deserialize)]
+struct PriorStatus {
+    id: String,
+    status: String,
+}
+
+/// Complete a recurring task: the regeneration unit is `task_id`'s own whole
+/// subtree (not just `task_id` alone) - marking a task done that still has
+/// not-done descendants would otherwise strand them, invisible in every view
+/// (`list_task_tree` et al. stop descending into a done task, exactly the
+/// "finishing a parent hides its whole branch" rule already relied on
+/// elsewhere). Concretely: every task in the subtree that isn't already done
+/// is marked done, and a fresh, empty-slate copy of the whole subtree (new
+/// ids, nothing done, no time entries) is created in the same position -
+/// same parent (or the same project, for a top-level task), same structure,
+/// same per-node `periodicity` - except the root's own deadline, which
+/// advances to [`super::next_occurrence`] (falling back to today when it had
+/// none yet).
+///
+/// Logs one compound, undoable action - see [`revert_habit_completion`].
+///
+/// Caller's responsibility: only call this when `task_id` actually has an
+/// effective periodicity (`super::effective_periodicity`); this function
+/// doesn't check.
+pub fn complete_recurring_task(
+    conn: &Connection,
+    task_id: &str,
+    spec: &crate::domain::Periodicity,
+) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+
+    let (tasks, _entries) = subtree_snapshot(&tx, task_id)?;
+    let root = tasks.first().expect("task_id names a real task").clone();
+
+    // Where the fresh copy attaches: the original's own parent, if it has
+    // one and it still exists, else (a genuine top-level task) its project.
+    let parent = match &root.parent_task_id {
+        Some(pid) if exists(&tx, "tasks", pid)? => Some(pid.clone()),
+        _ => None,
+    };
+    let root_project = if parent.is_none() {
+        root.project_id.clone()
+    } else {
+        None
+    };
+
+    let today = super::today_string(&tx)?;
+    let anchor = root.deadline.as_deref().unwrap_or(&today);
+    let next_deadline = super::next_occurrence(&tx, spec, anchor, &today)?;
+
+    // Pre-order (parents before children, guaranteed by `subtree_snapshot`),
+    // so each child's fresh parent id is already in `id_map` by the time it's
+    // needed.
+    let mut id_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut new_root_id = String::new();
+    for (i, t) in tasks.iter().enumerate() {
+        let new_parent = if i == 0 {
+            parent.clone()
+        } else {
+            t.parent_task_id
+                .as_ref()
+                .and_then(|p| id_map.get(p))
+                .cloned()
+        };
+        let new_project = if i == 0 {
+            root_project.as_deref()
+        } else {
+            None
+        };
+        let created = super::create_task(&tx, &t.title, new_parent.as_deref(), new_project)?;
+        if i == 0 {
+            new_root_id = created.id.clone();
+        }
+        id_map.insert(t.id.clone(), created.id.clone());
+
+        let deadline = if i == 0 {
+            Some(next_deadline.as_str())
+        } else {
+            t.deadline.as_deref()
+        };
+        if let Some(d) = deadline {
+            super::set_task_deadline(&tx, &created.id, Some(d))?;
+        }
+        if !t.notes.is_empty() {
+            super::set_task_notes(&tx, &created.id, &t.notes)?;
+        }
+        if let Some(p) = t
+            .periodicity
+            .as_deref()
+            .and_then(crate::domain::Periodicity::from_stored)
+        {
+            super::set_task_periodicity(&tx, &created.id, Some(&p))?;
+        }
+    }
+
+    let mut priors = Vec::with_capacity(tasks.len());
+    for t in &tasks {
+        priors.push(PriorStatus {
+            id: t.id.clone(),
+            status: t.status.clone(),
+        });
+        if t.status != "done" {
+            super::set_task_status(&tx, &t.id, TaskStatus::Done)?;
+        }
+    }
+
+    let summary = if tasks.len() > 1 {
+        format!(
+            "Completed recurring task \"{}\" and {} more",
+            root.title,
+            tasks.len() - 1
+        )
+    } else {
+        format!("Completed recurring task \"{}\"", root.title)
+    };
+    let payload = serde_json::json!({ "new_root_id": new_root_id, "priors": priors }).to_string();
+    insert_action(&tx, "complete_habit", &summary, &payload)?;
+
+    tx.commit()?;
+    Ok(())
+}
+
+/// If `task_id` was completed via [`complete_recurring_task`] and that
+/// action is still in the log, undo exactly that - deleting the regenerated
+/// copy (cascades its own subtree) and restoring every task that action
+/// completed back to its prior status, atomically - and report `true`.
+/// Otherwise a no-op reporting `false`, for the caller to fall back to a
+/// plain status flip. Scans newest-first since a task can appear as the
+/// completed root of at most one *live* `complete_habit` entry at a time
+/// (completing it again after this one is undone would be a different task
+/// entirely, the freshly regenerated copy).
+pub fn revert_habit_completion(conn: &Connection, task_id: &str) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare(
+        "SELECT id, payload FROM actions WHERE kind = 'complete_habit' ORDER BY id DESC",
+    )?;
+    let rows: Vec<(i64, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (action_id, payload) in rows {
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap_or_default();
+        let root_matches = value
+            .get("priors")
+            .and_then(|p| p.get(0))
+            .and_then(|p| p.get("id"))
+            .and_then(|v| v.as_str())
+            == Some(task_id);
+        if root_matches {
+            revert_action(conn, action_id)?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// What [`import_quick_creation`] created.
 pub struct ImportOutcome {
     pub project_id: String,
@@ -577,6 +737,23 @@ fn apply_one(conn: &Connection, action_id: i64) -> rusqlite::Result<()> {
                 super::delete_task(conn, id)?;
             }
             super::delete_project(conn, &p.project_id)?;
+        }
+        "complete_habit" => {
+            #[derive(Deserialize)]
+            struct Payload {
+                new_root_id: String,
+                priors: Vec<PriorStatus>,
+            }
+            let Ok(p) = serde_json::from_value::<Payload>(value) else {
+                return Ok(());
+            };
+            // Cascades the whole fresh copy away with it.
+            super::delete_task(conn, &p.new_root_id)?;
+            for prior in &p.priors {
+                if prior.status != "done" {
+                    super::set_task_status(conn, &prior.id, TaskStatus::Todo)?;
+                }
+            }
         }
         _ => {}
     }
@@ -946,5 +1123,130 @@ mod tests {
         let after = super::super::get_task(&conn, &t.id).unwrap().unwrap();
         assert_eq!(after.title, "v1");
         assert_eq!(list_actions(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn complete_recurring_task_regenerates_the_whole_subtree_in_place() {
+        let conn = super::super::open_in_memory().unwrap();
+        let p = super::super::create_project(&conn, "Chores").unwrap();
+        let habit = super::super::create_task(&conn, "Weekly clean", None, Some(&p.id)).unwrap();
+        let sub = child(&conn, "Vacuum", &habit.id);
+        super::super::set_task_deadline(&conn, &habit.id, Some("2026-09-07")).unwrap();
+        let weekly = Periodicity::EveryWeeks { n: 1 };
+        super::super::set_task_periodicity(&conn, &habit.id, Some(&weekly)).unwrap();
+
+        complete_recurring_task(&conn, &habit.id, &weekly).unwrap();
+
+        // The originals are both done now, hidden from the active tree but
+        // still around for "Finished".
+        assert_eq!(
+            super::super::get_task(&conn, &habit.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            TaskStatus::Done
+        );
+        assert_eq!(
+            super::super::get_task(&conn, &sub.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            TaskStatus::Done
+        );
+
+        // A fresh, not-done copy exists in the same spot: same project, same
+        // child structure, deadline advanced a week, own periodicity carried
+        // over so it can regenerate again next time.
+        let tree =
+            super::super::list_task_tree(&conn, &super::super::ProjectFilter::All, false).unwrap();
+        assert_eq!(tree.len(), 2, "old, done subtree shouldn't show up here");
+        let new_habit = tree.iter().find(|n| n.depth == 0).unwrap();
+        assert_eq!(new_habit.task.title, "Weekly clean");
+        assert_ne!(new_habit.task.id, habit.id);
+        assert_eq!(new_habit.task.project_id, Some(p.id));
+        assert_eq!(new_habit.task.deadline.as_deref(), Some("2026-09-14"));
+        assert_eq!(
+            new_habit.task.periodicity.as_deref(),
+            Some(weekly.to_stored().as_str())
+        );
+        let new_sub = tree.iter().find(|n| n.depth == 1).unwrap();
+        assert_eq!(new_sub.task.title, "Vacuum");
+        assert_eq!(new_sub.task.parent_id, Some(new_habit.task.id.clone()));
+    }
+
+    #[test]
+    fn revert_habit_completion_undoes_regeneration_and_restores_the_original() {
+        let conn = super::super::open_in_memory().unwrap();
+        let habit = root(&conn, "Daily standup");
+        super::super::set_task_deadline(&conn, &habit.id, Some("2026-09-10")).unwrap();
+        let daily = Periodicity::EveryDays { n: 1 };
+        super::super::set_task_periodicity(&conn, &habit.id, Some(&daily)).unwrap();
+
+        complete_recurring_task(&conn, &habit.id, &daily).unwrap();
+        assert_eq!(list_actions(&conn).unwrap().len(), 1);
+        let tree_before =
+            super::super::list_task_tree(&conn, &super::super::ProjectFilter::All, false).unwrap();
+        assert_eq!(tree_before.len(), 1);
+
+        let reverted = revert_habit_completion(&conn, &habit.id).unwrap();
+        assert!(reverted);
+
+        // The fresh copy is gone, the original is back to not-done, and the
+        // action it was logged under is gone too - a real undo, not a
+        // second, separately-undoable step.
+        assert_eq!(
+            super::super::get_task(&conn, &habit.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            TaskStatus::Todo
+        );
+        let tree_after =
+            super::super::list_task_tree(&conn, &super::super::ProjectFilter::All, false).unwrap();
+        assert_eq!(tree_after.len(), 1);
+        assert_eq!(tree_after[0].task.id, habit.id);
+        assert!(list_actions(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn revert_habit_completion_is_a_noop_for_an_ordinary_finished_task() {
+        let conn = super::super::open_in_memory().unwrap();
+        let t = root(&conn, "one-off");
+        super::super::set_task_status(&conn, &t.id, TaskStatus::Done).unwrap();
+        log_set_status(&conn, &t.id, "one-off", TaskStatus::Todo, true).unwrap();
+
+        assert!(!revert_habit_completion(&conn, &t.id).unwrap());
+        // Untouched - the plain "set_status" action is still there for the
+        // caller to fall back to.
+        assert_eq!(list_actions(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn complete_recurring_task_leaves_an_already_done_subtask_done_through_revert() {
+        let conn = super::super::open_in_memory().unwrap();
+        let habit = root(&conn, "Routine");
+        let sub = child(&conn, "Already done separately", &habit.id);
+        super::super::set_task_status(&conn, &sub.id, TaskStatus::Done).unwrap();
+        let daily = Periodicity::EveryDays { n: 1 };
+        super::super::set_task_periodicity(&conn, &habit.id, Some(&daily)).unwrap();
+
+        complete_recurring_task(&conn, &habit.id, &daily).unwrap();
+        revert_habit_completion(&conn, &habit.id).unwrap();
+
+        assert_eq!(
+            super::super::get_task(&conn, &habit.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            TaskStatus::Todo
+        );
+        // Was already done before the habit ever completed - stays done.
+        assert_eq!(
+            super::super::get_task(&conn, &sub.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            TaskStatus::Done
+        );
     }
 }
