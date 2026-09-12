@@ -2773,7 +2773,7 @@ ApplicationWindow {
                     font.family: "monospace"
                     font.pointSize: 9
                     elide: Text.ElideRight
-                    text: qsTr("title | time invested | deadline | description")
+                    text: qsTr("Full task syntax: title | time invested | deadline | description")
                 }
                 Label {
                     Layout.fillWidth: true
@@ -2781,7 +2781,7 @@ ApplicationWindow {
                     font.pointSize: 9
                     opacity: 0.6
                     elide: Text.ElideRight
-                    text: qsTr("Finish painting the bike | 33:22 | 2025-09-30 | Use matte black")
+                    text: qsTr("Full example: Finish painting the bike | 01:10 | 2025-09-30 | Use matte black")
                 }
             }
 
