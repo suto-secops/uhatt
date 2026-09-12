@@ -1807,12 +1807,15 @@ ApplicationWindow {
                         // has an effective periodicity, its own or an
                         // ancestor's - the same check `setDone` uses to
                         // decide whether completing it regenerates a subtree.
-                        // Shows even at 0 overdue, so a habit is identifiable
-                        // without opening the info panel.
+                        // The periodicity text sits directly in the tag (no
+                        // hover needed); the overdue count only joins it once
+                        // there actually is one.
                         Rectangle {
                             id: recurringBadge
                             readonly property string effText:
                                 (tasks.dataVersion, tasks.effectivePeriodicityText(rowItem.index))
+                            readonly property int missedCount:
+                                (tasks.dataVersion, tasks.missedCount(rowItem.index))
                             visible: effText !== ""
                             implicitWidth: recurringRow.implicitWidth + 8
                             implicitHeight: recurringRow.implicitHeight + 4
@@ -1821,10 +1824,6 @@ ApplicationWindow {
                                            palette.highlight.b, 0.15)
                             border.color: palette.highlight
                             border.width: 1
-                            ToolTip.text: recurringBadge.effText
-                            ToolTip.visible: recurringHover.hovered
-
-                            HoverHandler { id: recurringHover }
 
                             Row {
                                 id: recurringRow
@@ -1836,8 +1835,13 @@ ApplicationWindow {
                                     color: palette.highlight
                                 }
                                 Label {
-                                    text: qsTr("Overdue: %1").arg(
-                                        (tasks.dataVersion, tasks.missedCount(rowItem.index)))
+                                    text: recurringBadge.effText
+                                    font.pointSize: 8
+                                    color: palette.highlight
+                                }
+                                Label {
+                                    visible: recurringBadge.missedCount > 0
+                                    text: qsTr("· Overdue: %1").arg(recurringBadge.missedCount)
                                     font.pointSize: 8
                                     color: palette.highlight
                                 }
