@@ -818,6 +818,31 @@ ApplicationWindow {
                                         : qsTr("e.g. “%1  ·  %2”").arg(root.fmtDate(iso)).arg(s)
                     }
                 }
+                Label {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 8
+                    Layout.topMargin: 8
+                    text: qsTr("On a task row, show the deadline:")
+                    wrapMode: Text.WordWrap
+                }
+                Flow {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 8
+                    Layout.topMargin: 4
+                    spacing: 6
+                    Button {
+                        text: qsTr("Right of the title")
+                        checkable: true
+                        checked: settings.deadlineAlignLeft
+                        onClicked: settings.deadlineAlignLeft = true
+                    }
+                    Button {
+                        text: qsTr("Left of the timer")
+                        checkable: true
+                        checked: !settings.deadlineAlignLeft
+                        onClicked: settings.deadlineAlignLeft = false
+                    }
+                }
             }
 
             // ---- Calendar group ----
@@ -1144,6 +1169,7 @@ ApplicationWindow {
                     required property int depth
                     required property bool hasChildren
                     required property bool expanded
+                    required property string branchMask
                     property bool editing: false
                     property bool dropHover: false
 
@@ -1156,58 +1182,15 @@ ApplicationWindow {
                     }
 
                     contentItem: RowLayout {
+                        id: pRow
                         spacing: 4
 
+                        // Reserves the indent + expander width - the guide
+                        // lines and collapse/expand box filling it are drawn
+                        // by `pguides` (below), a full-height sibling.
                         Item {
-                            Layout.preferredWidth: pdel.depth * 16
-                            Layout.minimumWidth: pdel.depth * 16
-                        }
-
-                        // Collapse/expand box - same "-"/"+" drawing as the
-                        // task tree's, without the full-height guide lines
-                        // (a 160-420px sidebar has no room for pipe/elbow
-                        // guides on top of a project tree already this deep).
-                        Item {
-                            Layout.preferredWidth: 16
-                            Layout.minimumWidth: 16
-                            Layout.alignment: Qt.AlignVCenter
-                            visible: pdel.hasChildren
-                            implicitHeight: 13
-
-                            Rectangle {
-                                x: 1.5
-                                y: 0
-                                width: 13
-                                height: 13
-                                radius: 2
-                                color: "transparent"
-                                border.width: 1
-                                border.color: pdisc.containsMouse
-                                              ? palette.highlight : palette.text
-                                opacity: pdisc.containsMouse ? 1.0 : 0.35
-
-                                Rectangle {
-                                    x: 3
-                                    y: 6
-                                    width: 7
-                                    height: 1
-                                    color: parent.border.color
-                                }
-                                Rectangle {
-                                    visible: !pdel.expanded
-                                    x: 6
-                                    y: 3
-                                    width: 1
-                                    height: 7
-                                    color: parent.border.color
-                                }
-                            }
-                            MouseArea {
-                                id: pdisc
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                onClicked: projects.toggleExpanded(pdel.index)
-                            }
+                            Layout.preferredWidth: (pdel.depth + 1) * 16
+                            Layout.minimumWidth: (pdel.depth + 1) * 16
                         }
 
                         Label {
@@ -1232,6 +1215,109 @@ ApplicationWindow {
                             }
                             onActiveFocusChanged: if (!activeFocus)
                                 pdel.editing = false
+                        }
+                    }
+
+                    // Ancestor guide lines + collapse/expand box, same
+                    // drawing as the task tree's `guides` (18px grid there,
+                    // 16px here to match the project row's existing indent).
+                    Item {
+                        id: pguides
+
+                        anchors.left: parent.left
+                        anchors.leftMargin: pdel.leftPadding
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        width: (pdel.depth + 1) * 16
+
+                        readonly property color ink: palette.text
+                        readonly property real fade: 0.35
+                        readonly property real mid: pdel.topPadding + pRow.height / 2
+                        readonly property real span: height + projectList.spacing
+
+                        Repeater {
+                            model: pdel.depth
+                            delegate: Item {
+                                required property int index
+                                readonly property bool connector:
+                                    index === pdel.depth - 1
+                                readonly property bool carries:
+                                    pdel.branchMask.charAt(index) === "1"
+                                x: index * 16
+                                width: 16
+                                height: pguides.height
+
+                                Rectangle {
+                                    x: 7.5
+                                    width: 1
+                                    color: pguides.ink
+                                    opacity: pguides.fade
+                                    y: 0
+                                    height: parent.connector
+                                            ? (parent.carries ? pguides.span : pguides.mid)
+                                            : (parent.carries ? pguides.span : 0)
+                                }
+                                Rectangle {
+                                    visible: parent.connector
+                                    x: 7.5
+                                    y: pguides.mid
+                                    width: 9
+                                    height: 1
+                                    color: pguides.ink
+                                    opacity: pguides.fade
+                                }
+                            }
+                        }
+
+                        Item {
+                            visible: pdel.hasChildren
+                            x: pdel.depth * 16
+                            width: 16
+                            height: pguides.height
+
+                            Rectangle {
+                                visible: pdel.expanded
+                                x: 7.5
+                                width: 1
+                                y: pguides.mid + 7
+                                height: pguides.span - (pguides.mid + 7)
+                                color: pguides.ink
+                                opacity: pguides.fade
+                            }
+                            Rectangle {
+                                x: 1.5
+                                y: pguides.mid - 6.5
+                                width: 13
+                                height: 13
+                                radius: 2
+                                color: "transparent"
+                                border.width: 1
+                                border.color: pdisc.containsMouse
+                                              ? palette.highlight : pguides.ink
+                                opacity: pdisc.containsMouse ? 1.0 : pguides.fade
+
+                                Rectangle {
+                                    x: 3
+                                    y: 6
+                                    width: 7
+                                    height: 1
+                                    color: parent.border.color
+                                }
+                                Rectangle {
+                                    visible: !pdel.expanded
+                                    x: 6
+                                    y: 3
+                                    width: 1
+                                    height: 7
+                                    color: parent.border.color
+                                }
+                            }
+                            MouseArea {
+                                id: pdisc
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                onClicked: projects.toggleExpanded(pdel.index)
+                            }
                         }
                     }
 
@@ -1654,8 +1740,23 @@ ApplicationWindow {
                         // Title: a plain label until you deliberately edit it.
                         // The click target is only as wide as the text, so the
                         // rest of the row still toggles the info panel.
+                        // `fillWidth` here is what pushes the deadline (and
+                        // everything after) to the right - only when the
+                        // "right aligned" deadline setting is on, so the
+                        // trailing spacer below can take over that job for
+                        // the "left aligned" case instead.
                         Item {
-                            Layout.fillWidth: true
+                            Layout.fillWidth: !settings.deadlineAlignLeft
+                            // A plain Item has no content-derived implicit
+                            // size, so when it isn't filling (left-aligned
+                            // deadline) it must be told its own width -
+                            // otherwise it collapses to 0 and the title spills
+                            // out over whatever comes next. Capped so one
+                            // very long title can't push the rest of the row
+                            // off-screen; fillWidth mode is already capped by
+                            // the RowLayout's own available space instead.
+                            implicitWidth: Layout.fillWidth
+                                ? 0 : Math.min(titleLabel.implicitWidth, 260)
                             implicitHeight: Math.max(titleLabel.implicitHeight,
                                                      titleEdit.implicitHeight)
 
@@ -1702,6 +1803,47 @@ ApplicationWindow {
                             }
                         }
 
+                        // Recurring indicator: a task is "recurring" when it
+                        // has an effective periodicity, its own or an
+                        // ancestor's - the same check `setDone` uses to
+                        // decide whether completing it regenerates a subtree.
+                        // Shows even at 0 overdue, so a habit is identifiable
+                        // without opening the info panel.
+                        Rectangle {
+                            id: recurringBadge
+                            readonly property string effText:
+                                (tasks.dataVersion, tasks.effectivePeriodicityText(rowItem.index))
+                            visible: effText !== ""
+                            implicitWidth: recurringRow.implicitWidth + 8
+                            implicitHeight: recurringRow.implicitHeight + 4
+                            radius: 3
+                            color: Qt.rgba(palette.highlight.r, palette.highlight.g,
+                                           palette.highlight.b, 0.15)
+                            border.color: palette.highlight
+                            border.width: 1
+                            ToolTip.text: recurringBadge.effText
+                            ToolTip.visible: recurringHover.hovered
+
+                            HoverHandler { id: recurringHover }
+
+                            Row {
+                                id: recurringRow
+                                anchors.centerIn: parent
+                                spacing: 3
+                                Label {
+                                    text: "↻"
+                                    font.pointSize: 9
+                                    color: palette.highlight
+                                }
+                                Label {
+                                    text: qsTr("Overdue: %1").arg(
+                                        (tasks.dataVersion, tasks.missedCount(rowItem.index)))
+                                    font.pointSize: 8
+                                    color: palette.highlight
+                                }
+                            }
+                        }
+
                         Rectangle {
                             visible: rowItem.sessionTask
                             implicitWidth: 9
@@ -1724,6 +1866,13 @@ ApplicationWindow {
                             font.pointSize: 9
                             color: rowItem.overdue ? "#e74c3c" : palette.text
                             opacity: rowItem.overdue ? 1 : 0.7
+                        }
+
+                        // Takes over from the title's `fillWidth` when the
+                        // deadline is "left aligned" (right after the title),
+                        // so the timer/more buttons still dock to the right.
+                        Item {
+                            Layout.fillWidth: settings.deadlineAlignLeft
                         }
 
                         // Primary row action. Idle -> start; running -> pause;
@@ -2047,7 +2196,7 @@ ApplicationWindow {
                                     tasks.missedCount(rowItem.index))
                                 visible: effText !== ""
                                 text: effText + (missed > 0
-                                                  ? qsTr("  ·  %1 missed").arg(missed) : "")
+                                                  ? qsTr("  ·  %1 overdue").arg(missed) : "")
                             }
 
                             Label {

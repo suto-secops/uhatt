@@ -38,6 +38,9 @@ pub mod qobject {
         // Show the "Initial time" row (set by quick creation) on a task's
         // info panel. Doesn't affect whether it's captured on import.
         #[qproperty(bool, show_initial_time, cxx_name = "showInitialTime", READ, WRITE = set_show_initial_time, NOTIFY)]
+        // Task row deadline position: true = right after the title, false
+        // (default) = pushed right, just before the timer button.
+        #[qproperty(bool, deadline_align_left, cxx_name = "deadlineAlignLeft", READ, WRITE = set_deadline_align_left, NOTIFY)]
         type Settings = super::SettingsRust;
     }
 
@@ -65,6 +68,9 @@ pub mod qobject {
         #[cxx_name = "setShowInitialTime"]
         fn set_show_initial_time(self: Pin<&mut Settings>, value: bool);
 
+        #[cxx_name = "setDeadlineAlignLeft"]
+        fn set_deadline_align_left(self: Pin<&mut Settings>, value: bool);
+
         /// "time left until `iso_date`" per the current setting; "" when the
         /// countdown is off or the date can't be read.
         #[qinvokable]
@@ -83,6 +89,7 @@ pub struct SettingsRust {
     date_format: i32,
     quick_create_indent_tab: bool,
     show_initial_time: bool,
+    deadline_align_left: bool,
 }
 
 impl Default for SettingsRust {
@@ -99,6 +106,7 @@ impl Default for SettingsRust {
             date_format: 0,
             quick_create_indent_tab: false,
             show_initial_time: true,
+            deadline_align_left: false,
         }
     }
 }
@@ -111,6 +119,7 @@ const SHOW_TASK_COUNT_KEY: &str = "calendar_show_task_count";
 const DATE_FORMAT_KEY: &str = "date_format";
 const QUICK_CREATE_INDENT_TAB_KEY: &str = "quick_create_indent_tab";
 const SHOW_INITIAL_TIME_KEY: &str = "show_initial_time";
+const DEADLINE_ALIGN_LEFT_KEY: &str = "deadline_align_left";
 
 fn mode_of(value: i32) -> CountdownMode {
     match value {
@@ -147,6 +156,7 @@ impl cxx_qt::Initialize for qobject::Settings {
             .unwrap_or(0);
         let quick_create_indent_tab = read_bool(&conn, QUICK_CREATE_INDENT_TAB_KEY, false);
         let show_initial_time = read_bool(&conn, SHOW_INITIAL_TIME_KEY, true);
+        let deadline_align_left = read_bool(&conn, DEADLINE_ALIGN_LEFT_KEY, false);
         {
             let mut rust = self.as_mut().rust_mut();
             rust.conn = Some(conn);
@@ -157,6 +167,7 @@ impl cxx_qt::Initialize for qobject::Settings {
             rust.date_format = date_format;
             rust.quick_create_indent_tab = quick_create_indent_tab;
             rust.show_initial_time = show_initial_time;
+            rust.deadline_align_left = deadline_align_left;
         }
     }
 }
@@ -252,6 +263,15 @@ impl qobject::Settings {
         self.as_mut().rust_mut().show_initial_time = value;
         persist_bool(self.db_conn(), SHOW_INITIAL_TIME_KEY, value);
         self.as_mut().show_initial_time_changed();
+    }
+
+    fn set_deadline_align_left(mut self: Pin<&mut Self>, value: bool) {
+        if self.deadline_align_left == value {
+            return;
+        }
+        self.as_mut().rust_mut().deadline_align_left = value;
+        persist_bool(self.db_conn(), DEADLINE_ALIGN_LEFT_KEY, value);
+        self.as_mut().deadline_align_left_changed();
     }
 
     fn countdown_text(&self, iso_date: &QString) -> QString {

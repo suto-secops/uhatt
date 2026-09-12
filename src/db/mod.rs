@@ -965,6 +965,32 @@ pub struct ProjectNode {
     pub project: Project,
     pub depth: u32,
     pub has_children: bool,
+    /// Per indent column (`depth` entries), whether a full-height tree guide
+    /// line should be drawn there - same meaning as `TaskNode::branch_more`.
+    pub branch_more: Vec<bool>,
+}
+
+/// Fill in `branch_more` for a pre-ordered, depth-tagged list - identical
+/// logic to [`annotate_branches`], duplicated rather than shared since the
+/// two node types differ.
+fn annotate_project_branches(nodes: &mut [ProjectNode]) {
+    let n = nodes.len();
+    let mut last = vec![true; n];
+    for k in 0..n {
+        let d = nodes[k].depth;
+        let mut j = k + 1;
+        while j < n && nodes[j].depth > d {
+            j += 1;
+        }
+        last[k] = j == n || nodes[j].depth < d;
+    }
+    let mut stack: Vec<bool> = Vec::new();
+    for k in 0..n {
+        let d = nodes[k].depth as usize;
+        stack.truncate(d);
+        stack.push(last[k]);
+        nodes[k].branch_more = (0..d).map(|i| !stack[i + 1]).collect();
+    }
 }
 
 /// Every non-archived project, pre-ordered for the flattened sidebar tree.
@@ -991,9 +1017,12 @@ pub fn list_project_tree(conn: &Connection) -> rusqlite::Result<Vec<ProjectNode>
             project: row_to_project(r)?,
             depth: r.get::<_, i64>(6)? as u32,
             has_children: r.get::<_, i64>(7)? != 0,
+            branch_more: Vec::new(),
         })
     })?;
-    rows.collect()
+    let mut nodes: Vec<ProjectNode> = rows.collect::<rusqlite::Result<_>>()?;
+    annotate_project_branches(&mut nodes);
+    Ok(nodes)
 }
 
 /// Whether `id` may be re-parented under `new_parent` (or moved to the top
@@ -2285,6 +2314,32 @@ mod tests {
             .map(|n| (n.project.name.as_str(), n.depth, n.has_children))
             .collect();
         assert_eq!(shape, [("A", 0, true), ("A1", 1, false), ("B", 0, false)]);
+    }
+
+    #[test]
+    fn project_tree_guide_flags_track_ancestor_branches() {
+        let conn = open_in_memory().unwrap();
+        let a = create_project(&conn, "A").unwrap();
+        let a1 = create_project(&conn, "A1").unwrap();
+        reparent_project(&conn, &a1.id, Some(&a.id)).unwrap();
+        let a2 = create_project(&conn, "A2").unwrap();
+        reparent_project(&conn, &a2.id, Some(&a.id)).unwrap();
+        create_project(&conn, "B").unwrap();
+
+        let tree = list_project_tree(&conn).unwrap();
+        let by: Vec<_> = tree
+            .iter()
+            .map(|n| (n.project.name.as_str(), n.branch_more.clone()))
+            .collect();
+        assert_eq!(
+            by,
+            [
+                ("A", vec![]),       // a root with B after it
+                ("A1", vec![true]),  // A has A2 after A1 -> col 0 pipes
+                ("A2", vec![false]), // last child of A
+                ("B", vec![]),       // last root
+            ]
+        );
     }
 
     #[test]

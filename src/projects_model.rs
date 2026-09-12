@@ -45,6 +45,10 @@ pub mod qobject {
         HasChildren,
         /// Whether this project's sub-projects are currently shown.
         Expanded,
+        /// One char per indent column, "1" where a tree guide line runs
+        /// full-height, "0" where it stops at this row's connector - same
+        /// meaning as `TaskListModel`'s `branchMask` role.
+        BranchMask,
     }
 
     extern "RustQt" {
@@ -323,6 +327,14 @@ impl qobject::ProjectListModel {
             qobject::ProjectRole::Expanded => {
                 QVariant::from(&(node.has_children && !self.collapsed.contains(&node.project.id)))
             }
+            qobject::ProjectRole::BranchMask => {
+                let mask: String = node
+                    .branch_more
+                    .iter()
+                    .map(|&more| if more { '1' } else { '0' })
+                    .collect();
+                QVariant::from(&QString::from(mask.as_str()))
+            }
             _ => QVariant::default(),
         }
     }
@@ -339,6 +351,10 @@ impl qobject::ProjectListModel {
         roles.insert(
             qobject::ProjectRole::Expanded.repr,
             QByteArray::from("expanded"),
+        );
+        roles.insert(
+            qobject::ProjectRole::BranchMask.repr,
+            QByteArray::from("branchMask"),
         );
         roles
     }
